@@ -85,6 +85,15 @@ Sessions are created with `source: "herald_os"`. Upstream only folds Desktop-onl
 sessions whose source is `desktop`, so a Herald OS session never receives tools whose client half
 lives in Hermes Desktop.
 
+A conversation can also run as another Hermes profile, a bot (`src/store/bots.ts`; the roster is
+`profiles.list`, a bot's picture `profiles.get_asset`). Each profile keeps its sessions in its own
+`state.db`, so `session.create`, `session.list`, `session.resume` and `session.delete` carry the
+bot's `profile`: the gateway opens that profile's store and home (an unknown profile is error
+4064), and a resume without it looks in the launch profile's store and finds nothing. The live
+session keeps its profile, so `prompt.submit` and the other calls by runtime id need none, and
+Hermes's own sessions still go without `profile`. Stored ids can repeat across profiles, so the
+renderer keys a bot's sessions by profile and id.
+
 Server-to-client requests the shell answers: `approval`, `clarify`, `sudo`, `secret`. Anything else
 is declined with `-32601` so the backend treats it as unanswered rather than hanging.
 
@@ -105,12 +114,21 @@ It runs in one of two modes, chosen by Electron main (`electron/shell/mode.ts`):
 | Mode | Used by | Windows |
 | --- | --- | --- |
 | `desktop` | macOS, Linux under `cage` | One fullscreen Electron window; the renderer's own window manager (`src/store/windows.ts`, `src/shell/wm/`) lays out every app inside it. |
-| `panels` | Linux under `niri` (`HERALD_OS_SHELL_MODE=panels`) | One Electron window per surface (menu bar, dock, main window, command bar, wallpaper, each floating app), tiled by the compositor. `src/shell/ShellRoot.tsx` picks what each window shows. |
+| `panels` | Linux under `niri` (`HERALD_OS_SHELL_MODE=panels`) | One Electron window per surface (menu bar, dock, main window, command bar, wallpaper, each floating app), tiled by the compositor. `src/shell/ShellRoot.tsx` picks what each window shows. The Dock's menu for a running app is a window the Dock opens and draws into itself. |
 
 Code layout (details in [`apps/desktop/README.md`](../apps/desktop/README.md), conventions in
 [`apps/desktop/DESIGN.md`](../apps/desktop/DESIGN.md)): `src/shell` is the desktop chrome,
 `src/features/<app>` holds one folder per app, `src/store` the nanostores state and actions,
 `src/lib` pure helpers with their tests, `src/commands` the OS command catalogue.
+
+Renderer faults land in the same log as main's own, `~/.hermes/logs/herald-os.log`.
+`src/lib/report.ts` writes each one on the window's console as one `[herald-os]` line with its stack:
+a call nothing waits on names itself when it fails (`logFailure`), and a net that `main.tsx` installs
+before anything else loads reports uncaught errors and unhandled rejections in place of Chromium's
+own line. Electron main copies each shell window's warnings and errors into the log as
+`[renderer] <surface>` lines (`electron/renderer-console.ts`), cut at 4,000 characters and at most 30
+a minute per window. Pages that are not Herald's are left out: web windows, Studio previews, file
+viewers and plugin frames.
 
 ## OS control
 

@@ -6,6 +6,8 @@ your Mac). Full guide: [docs/LINUX.md](../docs/LINUX.md).
 ```
 linux/
   provision.sh            first-boot provisioner (root, idempotent)
+  image/                  the bootc image: Containerfile, packages.sh, first boot, disk and ISO
+                          settings (docs/BUILDING-THE-IMAGE.md)
   bin/                    herald-os (the CLI every hotkey and menu calls), -theme, -omakase, -update,
                           -tarball (installs and updates the release tarball in /opt/herald-os)
   session/                greetd config, compositor + session launchers, wayland-sessions entry,
@@ -15,7 +17,7 @@ linux/
   themes/                 whole-desktop themes (shell, niri, terminal, wallpaper): herald-*
   omakase/                the default app set: dnf packages, Flatpaks, web apps
   plymouth/herald-os/     boot splash
-  migrations/             one-shot upgrade steps herald-os-update runs once per machine
+  migrations/             one-shot upgrade steps herald-os-update runs once (per account or per machine)
   dev/                    push.sh and vm-ssh.sh (Mac -> VM); build.sh, sync.sh, restart-shell.sh,
                           shot.sh (inside the VM)
   vm/                     download-image.sh, make-seed.sh (cloud-init), run-qemu.sh, run-vf.sh

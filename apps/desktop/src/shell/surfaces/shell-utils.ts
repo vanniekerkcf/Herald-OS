@@ -23,7 +23,9 @@ const OUR_FLOATING_TITLES: Record<string, FloatingAppId> = {
   'Herald OS · Canvas': 'canvas',
   'Herald OS · Docs': 'docs',
   'Herald OS · Sheets': 'sheets',
-  'Herald OS · Slides': 'slides'
+  'Herald OS · Slides': 'slides',
+  'Herald OS · Pet Room': 'room',
+  'Herald OS · Calc': 'calc'
 }
 
 export const OUR_MAIN_TITLE = 'Herald OS'
@@ -43,8 +45,8 @@ export function contextLine(context: WmWindow): string {
   return `Context: the focused window is "${windowLabel(context)}" (${context.appId || 'unknown app'}).`
 }
 
-/** Compose the final prompt text the way HermesComposer does for attachments. */
-export function composePrompt(text: string, context?: WmWindow | null, attachments?: string[]): string {
+/** The prompt text for a question asked about a window; its attachments travel with sendPrompt. */
+export function composePrompt(text: string, context?: WmWindow | null): string {
   const parts: string[] = []
 
   if (context) {
@@ -55,10 +57,6 @@ export function composePrompt(text: string, context?: WmWindow | null, attachmen
 
   if (body) {
     parts.push(body)
-  }
-
-  if (attachments && attachments.length > 0) {
-    parts.push(`Attached: ${attachments.join(', ')}`)
   }
 
   return parts.join('\n')

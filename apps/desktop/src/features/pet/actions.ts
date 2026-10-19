@@ -13,8 +13,9 @@ import { $petInfo, refreshPetInfo } from './info.ts'
 
 export const $petPrefs = computed($prefs, prefs => normalizePetPrefs(prefs.pet))
 
+/** Change only the fields `patch` names: this window's copy of the rest may be stale (another Herald can share prefs.json). */
 export function setPetPrefs(patch: Partial<PetPrefs>): Promise<void> {
-  return updatePrefs({ pet: { ...$petPrefs.get(), ...patch } })
+  return updatePrefs({ pet: patch })
 }
 
 export const hidePet = (): Promise<void> => setPetPrefs({ hidden: true })

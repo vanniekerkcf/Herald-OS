@@ -3,6 +3,7 @@ import { bindAgentEvents } from './agents.ts'
 import { bindRecording } from './capture.ts'
 import { bindEditTarget } from './edit-target.ts'
 import { bindBackendStores } from './backend.ts'
+import { refreshBots } from './bots.ts'
 import { bindChatEvents, resetChats } from './chat.ts'
 import { bindContinuity } from './continuity.ts'
 import { bindDictation } from './dictation.ts'
@@ -11,6 +12,7 @@ import { bindPlugins } from './plugins.ts'
 import { $connectionEpoch, bindGatewayToBackend } from './gateway.ts'
 import { bindFollow } from './follow.ts'
 import { bindHermesAuth } from './hermes-auth.ts'
+import { bindLanguage } from './i18n.ts'
 import { bindMissionEvents } from './missions.ts'
 import { bindSidebarPrefs } from './sidebar.ts'
 import { bindNotificationEvents, bindNotificationHistory } from './notifications.ts'
@@ -29,6 +31,8 @@ import { bindVoice } from './voice.ts'
 import { bindWake } from './wake.ts'
 import { surface } from './shell.ts'
 import { bindPetBrain } from '../features/pet/brain.ts'
+import { bindRoomCommandRelay } from '../features/room/commands.ts'
+import { bindRoomLog, guardRoomReads } from '../features/room/store.ts'
 import { bindPetInfo, bindPetSheet } from '../features/pet/info.ts'
 import { bindPetSnapshots } from '../features/pet/transport.ts'
 
@@ -48,6 +52,7 @@ export function bootRenderer(): void {
   if (surface === 'pet') {
     bindShell()
     bindBackendStores()
+    bindLanguage()
     bindBranding()
     bindPetInfo()
     bindPetSheet()
@@ -60,8 +65,10 @@ export function bootRenderer(): void {
   bindEditTarget()
   bindShell()
   bindBackendStores()
+  bindLanguage()
   bindGatewayToBackend()
   bindChatEvents()
+  guardRoomReads()
   bindServerRequests()
   bindNotificationEvents()
   bindAgentEvents()
@@ -89,6 +96,8 @@ export function bootRenderer(): void {
     bindNotificationHistory()
     bindBridgeSetupNotice()
     bindPetBrain()
+    bindRoomCommandRelay()
+    bindRoomLog()
   }
 
   if (surface === 'desktop') {
@@ -108,6 +117,7 @@ export function bootRenderer(): void {
 
     lastEpoch = epoch
     void refreshSessions()
+    void refreshBots()
   })
 
   if (import.meta.env.DEV) {

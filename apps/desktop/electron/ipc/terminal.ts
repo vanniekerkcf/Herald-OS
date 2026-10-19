@@ -1,11 +1,13 @@
-import { type BrowserWindow, ipcMain, type WebContents } from 'electron'
+import { BrowserWindow, clipboard, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
-import { IPC, type TerminalCreateOptions, type TerminalHandle } from '../../shared/ipc.ts'
+import { IPC, type TerminalClipboardRead, type TerminalCreateOptions, type TerminalHandle } from '../../shared/ipc.ts'
+import { overClipboardLimit } from '../../shared/terminal-clipboard.ts'
 import { terminalBin } from '../catalog/catalog.ts'
 import { log } from '../log.ts'
+import { isShellPage } from '../paths.ts'
 import { loadCatalog } from './catalog.ts'
 import { normalizeUserPath } from './fs.ts'
 
@@ -25,6 +27,17 @@ interface PtyModule {
 let ptyModule: PtyModule | null | undefined
 
 /**
+ * The `spawn-helper`s node-pty may start a shell through: beside the pty.node it loads, one it
+ * compiled or its prebuild for this machine. In a packaged app it runs them from app.asar.unpacked;
+ * the same path inside app.asar can be read but never changed.
+ */
+export function spawnHelperPaths(ptyEntry: string, platform: string = process.platform, arch: string = process.arch): string[] {
+  const root = path.dirname(path.dirname(ptyEntry)).replace(/app\.asar(?=[\\/]|$)/, 'app.asar.unpacked')
+
+  return [path.join(root, 'build', 'Release', 'spawn-helper'), path.join(root, 'prebuilds', `${platform}-${arch}`, 'spawn-helper')]
+}
+
+/**
  * npm strips the executable bit from node-pty's prebuilt `spawn-helper` (the tarball ships it
  * 0644), and pty.spawn then fails with `posix_spawnp failed`. Restore it before the first load.
  */
@@ -33,17 +46,20 @@ export function ensureSpawnHelperExecutable(ptyEntry: string): void {
     return
   }
 
-  const helper = path.join(path.dirname(path.dirname(ptyEntry)), 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper')
+  for (const helper of spawnHelperPaths(ptyEntry)) {
+    try {
+      const mode = fs.statSync(helper).mode
 
-  try {
-    const mode = fs.statSync(helper).mode
-
-    if ((mode & 0o111) === 0) {
-      fs.chmodSync(helper, mode | 0o755)
-      log('terminal', `restored executable bit on ${helper}`)
+      if ((mode & 0o111) === 0) {
+        fs.chmodSync(helper, mode | 0o755)
+        log('terminal', `restored executable bit on ${helper}`)
+      }
+    } catch (error) {
+      // node-pty compiles a helper only when it has no prebuild, so one of the two is usually missing.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        log('terminal', `could not make ${helper} executable: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
-  } catch {
-    // No prebuilt helper (compiled from source); nothing to fix.
   }
 }
 
@@ -62,6 +78,17 @@ export function loadPty(): PtyModule | null {
   }
 
   return ptyModule
+}
+
+const CLIPBOARD_READS_PER_SECOND = 5
+
+/**
+ * Whether a page has the keyboard. Under Ozone on Wayland a window's focus comes from the
+ * compositor's activation and can be reported wrongly, while a page's focus is Chromium's own
+ * input focus, so either one saying focused is enough.
+ */
+export function focused(contents: WebContents): boolean {
+  return Boolean(BrowserWindow.fromWebContents(contents)?.isFocused()) || contents.isFocused()
 }
 
 /** Real PTYs for the Terminal surface. One id per tab; output is pushed to the owning window. */
@@ -162,5 +189,58 @@ export function registerTerminalIpc(getWindow: () => BrowserWindow | null): void
   })
   ipcMain.handle(IPC.terminalDispose, (_event, id: string) => {
     kill(id)
+  })
+
+  // The shell's session grants no clipboard permission to pages, so Copy and Paste in the Terminal
+  // go through main; only the shell's own pages may ask.
+  const fromShell = (event: IpcMainInvokeEvent) => {
+    if (!event.senderFrame || !isShellPage(event.senderFrame.url)) {
+      throw new Error('Only Herald OS itself may use the clipboard')
+    }
+  }
+
+  // A person pastes into the window in front of them, and no faster than they press keys: each
+  // window has its own recent reads, forgotten when the window goes.
+  const reads = new Map<number, number[]>()
+  ipcMain.handle(IPC.terminalClipboardRead, async (event): Promise<TerminalClipboardRead> => {
+    fromShell(event)
+
+    if (!focused(event.sender)) {
+      return { refused: 'unfocused' }
+    }
+
+    const now = Date.now()
+    const recent = (reads.get(event.sender.id) ?? []).filter(at => now - at < 1000)
+
+    if (!reads.has(event.sender.id)) {
+      const id = event.sender.id
+      event.sender.once('destroyed', () => reads.delete(id))
+    }
+
+    if (recent.length >= CLIPBOARD_READS_PER_SECOND) {
+      reads.set(event.sender.id, recent)
+
+      return { refused: 'rate-limited' }
+    }
+
+    reads.set(event.sender.id, [...recent, now])
+    const text = await clipboard.readText()
+
+    return overClipboardLimit(text) ? { tooLarge: true } : { text }
+  })
+  ipcMain.handle(IPC.terminalClipboardWrite, async (event, text: unknown): Promise<void> => {
+    fromShell(event)
+
+    if (typeof text !== 'string') {
+      throw new Error('Only text can be copied from the Terminal')
+    }
+
+    if (overClipboardLimit(text)) {
+      throw new Error('That is more text than the Terminal copies at once')
+    }
+
+    if (text) {
+      await clipboard.writeText(text)
+    }
   })
 }

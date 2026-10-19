@@ -1,8 +1,9 @@
 import { useStore } from '@nanostores/react'
-import { IconPlus, IconTarget } from '@tabler/icons-react'
+import { IconPlus, IconSofa, IconTarget } from '@tabler/icons-react'
 import { useEffect, useState } from 'react'
 import { EmptyGlass, GlassButton, GlassCard, LinkAction, MoreButton, PageHeader, Section, Tabs, type TabDef } from '../../components/ui/glass.tsx'
 import { $activeMissions, $activity, $completedMissions, $missionFocus, $reviewMissions } from '../../store/missions.ts'
+import { openApp } from '../../store/windows.ts'
 import { ActivityTimeline } from './ActivityTimeline.tsx'
 import { MissionCard } from './MissionCard.tsx'
 import { MissionComposer } from './MissionComposer.tsx'
@@ -73,6 +74,10 @@ export function MissionsPage() {
         subtitle="From intent to finished work."
         actions={
           <>
+            <GlassButton onClick={() => openApp('room')}>
+              <IconSofa />
+              Pet Room
+            </GlassButton>
             <GlassButton onClick={() => setComposing(true)} aria-label="New mission">
               <IconPlus />
               New mission

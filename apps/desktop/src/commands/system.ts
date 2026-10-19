@@ -1,5 +1,9 @@
+import { LANGUAGES, type LanguageSetting } from '../../shared/i18n.ts'
 import type { HeraldOSPrefs, VoiceEngine } from '../../shared/ipc.ts'
+import { isPrivacyPane, PRIVACY_PANE_NAMES } from '../../shared/privacy-panes.ts'
+import { canOpenPrivacyPanes, openPrivacyPane } from '../lib/privacy-pane.ts'
 import { $prefs, updatePrefs } from '../store/backend.ts'
+import { $language, setLanguage } from '../store/i18n.ts'
 import { $nativeApps, loadNativeApps } from '../store/native-apps.ts'
 import { delegate, fail, ok, type OsCommand } from '../store/os-commands.ts'
 import { looksLikeFileNotUrl } from './files.ts'
@@ -17,7 +21,9 @@ const SECTION_ALIASES: Record<string, string> = {
   agent: 'agents',
   hermes: 'agents',
   model: 'agents',
+  provider: 'agents',
   account: 'agents',
+  language: 'general',
   look: 'appearance',
   theme: 'appearance',
   wallpaper: 'appearance',
@@ -34,6 +40,7 @@ const SECTION_ALIASES: Record<string, string> = {
   security: 'privacy',
   permissions: 'privacy',
   alerts: 'notifications',
+  'pet room': 'room',
   motion: 'accessibility',
   version: 'about',
   update: 'about',
@@ -134,7 +141,7 @@ export const systemCommands: readonly OsCommand[] = [
   {
     id: 'settings.open',
     title: 'Open Settings',
-    description: 'Open Settings, optionally at a section (general, appearance, pet, agents, usage, voice, privacy, notifications, network, storage, accessibility, about).',
+    description: 'Open Settings, optionally at a section (general, appearance, pet, room, agents, usage, voice, privacy, notifications, network, storage, accessibility, about).',
     tier: 'read',
     args: [
       { name: 'section', type: 'string', description: 'Section name' },
@@ -152,6 +159,64 @@ export const systemCommands: readonly OsCommand[] = [
       focusSettings({ section: id ?? undefined, query: query ? String(query) : undefined })
 
       return ok(id ? `Opened ${id} settings` : 'Opened Settings', { page: 'settings', highlight: id ? { kind: 'setting', id } : undefined })
+    }
+  },
+  {
+    id: 'privacy.openPane',
+    title: 'Open a Privacy & Security pane',
+    description: 'Open the list in macOS System Settings > Privacy & Security where Herald OS is allowed a permission (microphone, camera, calendars, screen, accessibility, automation).',
+    tier: 'read',
+    hidden: true,
+    args: [{ name: 'pane', type: 'string', description: 'The permission', required: true, enum: PRIVACY_PANE_NAMES }],
+    run: async ({ pane }) => {
+      if (!canOpenPrivacyPanes()) {
+        return fail('System Settings panes exist only on macOS.')
+      }
+
+      if (!isPrivacyPane(pane)) {
+        return fail(`No Privacy & Security pane called "${String(pane)}". Panes: ${PRIVACY_PANE_NAMES.join(', ')}.`)
+      }
+
+      await openPrivacyPane(pane)
+
+      return ok(`Opened System Settings > Privacy & Security > ${pane}`)
+    }
+  },
+  {
+    id: 'language.set',
+    title: 'Set the language',
+    description: 'Show Herald OS in English, Brazilian Portuguese (Português (Brasil)) or Simplified Chinese (简体中文), or follow the system languages again (the default).',
+    tier: 'mutate',
+    // pt-BR: its phrases stay English, like every voice phrase.
+    args: [
+      {
+        name: 'language',
+        type: 'string',
+        description: 'system, en (English), pt-BR (Brazilian Portuguese) or zh-CN (Simplified Chinese)',
+        required: true,
+        enum: ['system', 'en', 'pt-BR', 'zh-CN']
+      }
+    ],
+    phrases: [
+      { phrase: 'switch to english', args: { language: 'en' } },
+      { phrase: 'use english', args: { language: 'en' } },
+      { phrase: 'set the language to english', args: { language: 'en' } },
+      { phrase: 'switch to portuguese', args: { language: 'pt-BR' } },
+      { phrase: 'use portuguese', args: { language: 'pt-BR' } },
+      { phrase: 'set the language to portuguese', args: { language: 'pt-BR' } },
+      { phrase: 'switch to brazilian portuguese', args: { language: 'pt-BR' } },
+      { phrase: 'switch to chinese', args: { language: 'zh-CN' } },
+      { phrase: 'use chinese', args: { language: 'zh-CN' } },
+      { phrase: 'set the language to chinese', args: { language: 'zh-CN' } },
+      { phrase: 'use the system language', args: { language: 'system' } },
+      { phrase: 'follow the system language', args: { language: 'system' } }
+    ],
+    run: async ({ language }) => {
+      const setting = language as LanguageSetting
+      await setLanguage(setting)
+      const shown = LANGUAGES.find(entry => entry.id === $language.get())?.name
+
+      return ok(setting === 'system' ? `Herald OS follows the system language: ${shown}` : `Herald OS is in ${shown}`, { highlight: { kind: 'setting', id: 'general' } })
     }
   },
   {

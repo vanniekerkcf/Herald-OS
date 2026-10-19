@@ -1,26 +1,28 @@
 import type { ApprovalChoice } from '@herald-os/client'
 import type { SystemStats } from '../../../shared/ipc.ts'
-import { type PetAction, type PetApproval, type PetDropSuggestionId, type PetFollow, type PetFollowApp, type PetMood, type PetNote, type PetSnapshot, petShown } from '../../../shared/pet.ts'
+import { type PetAction, type PetDropSuggestionId, type PetFollow, type PetMood, type PetNote, type PetSnapshot, petShown } from '../../../shared/pet.ts'
 import { approvalFacts } from '../../lib/approval-choices.ts'
-import type { ChatMessage, ChatState } from '../../lib/chat-model.ts'
+import type { ChatState } from '../../lib/chat-model.ts'
 import { $backend, $env } from '../../store/backend.ts'
 import { $activeChatId, $chats } from '../../store/chat.ts'
 import { $connection, onGatewayEvent } from '../../store/gateway.ts'
-import { $commandLog, type CommandEvent, runCommand } from '../../store/os-commands.ts'
-import { $pendingRequests, type PendingRequest, resolveRequest } from '../../store/requests.ts'
+import { $commandLog, runCommand } from '../../store/os-commands.ts'
+import { $pendingRequests, resolveRequest } from '../../store/requests.ts'
 import { isPanels, openSurface } from '../../store/shell.ts'
 import { $switches } from '../../store/switches.ts'
 import { $voice, $voiceActive, $voiceSessionId } from '../../store/voice.ts'
 import { $page, $windows } from '../../store/windows.ts'
 import { cronApi } from '../automations/api.ts'
+import { approvalOf, chatSignals, derivePetActivity, FOLLOW_MS, FOLLOW_WORKING_MS, followAlive, followFrom, nextBeatEnd, type PetSignals, stepOf, turnEndOf, turnStart } from '../petdex/activity.ts'
 import { $petPrefs } from './actions.ts'
 import { $petChat, $petSessionId, askPet, newPetChat, openInHermesWindow, openPetChatInHermes, setPetError, stopPet } from './chat.ts'
 import { dropAction } from './drops.ts'
 import { autoHideReason } from './hide.ts'
 import { $petInfo } from './info.ts'
 import { jobNote, nextMood, NoteGate, updateNote } from './moods.ts'
-import { derivePetActivity, nextBeatEnd, type PetSignals, stepOf, turnEndOf } from './state.ts'
 import { handlePetActions, publishPetSnapshot } from './transport.ts'
+
+export { approvalOf, chatSignals, type ChatSignals, followAlive, followFrom, turnStart } from '../petdex/activity.ts'
 
 /*
  * The pet's brain, in the Hermes window: what Hermes is doing (its sessions, the approval it waits
@@ -31,73 +33,11 @@ import { handlePetActions, publishPetSnapshot } from './transport.ts'
  */
 
 const UPDATE_KEY = 'herald-os.update-available'
-/** How long the pet stays by a window after Hermes's last command there, and while a turn still runs. */
-const FOLLOW_MS = 20_000
-const FOLLOW_WORKING_MS = 90_000
 const MOOD_EVERY_MS = 3 * 60_000
 const UPDATE_EVERY_MS = 5 * 60_000
 const AUTOMATIONS_EVERY_MS = 2 * 60_000
 /** Snapshots go out at most this often while text streams in. */
 const PUBLISH_MS = 120
-
-const FOLLOW_COMMAND = /^(docs|sheets|slides|canvas)\.([a-zA-Z]+)$/
-/** Commands that only list or describe what is open: Hermes is not working in a window for them. */
-const QUIET_VERBS = new Set(['list', 'status', 'history', 'layers'])
-const DOCUMENT_ARGS = ['document', 'presentation', 'workbook', 'path', 'name', 'project']
-
-export interface ChatSignals {
-  working: boolean
-  toolRunning: boolean
-  reasoning: boolean
-  /** The turn the pet reports on: its own, then the one in the Hermes window, then the latest. */
-  focus: ChatState | null
-  /** Turns running in sessions nobody is looking at. */
-  background: number
-}
-
-/** Where the turn now under way starts: its person's message. */
-export function turnStart(messages: readonly ChatMessage[]): number {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    if (messages[index].role === 'user') {
-      return index
-    }
-  }
-
-  return 0
-}
-
-export function chatSignals(chats: readonly ChatState[], prefer: readonly (string | null)[]): ChatSignals {
-  const streaming = chats.filter(chat => chat.streaming)
-  const focus = prefer.map(id => streaming.find(chat => chat.sessionId === id)).find(Boolean) ?? streaming.at(-1) ?? null
-  const turn = focus ? focus.messages.slice(turnStart(focus.messages)) : []
-  const toolRunning = turn.some(message => message.role === 'tool' && message.running)
-  const open = focus?.openAssistantId ? turn.find(message => message.id === focus.openAssistantId) : undefined
-  const reasoning = !toolRunning && open?.role === 'assistant' && Boolean(open.reasoning) && !open.text
-
-  return { working: streaming.length > 0, toolRunning, reasoning, focus, background: streaming.filter(chat => !prefer.includes(chat.sessionId)).length }
-}
-
-/** The approval the pet holds up: the oldest one waiting, with only what the approval card shows. */
-export function approvalOf(pending: readonly PendingRequest[], voice: { active: boolean; sessionId: string | null }): { approval: PetApproval | null; waiting: number } {
-  const approvals = pending.filter(entry => entry.kind === 'approval')
-  const first = approvals[0]
-
-  if (!first || first.kind !== 'approval') {
-    return { approval: null, waiting: 0 }
-  }
-
-  const params = first.request.params
-  const spoken = voice.active && voice.sessionId !== null && (params.session_id === voice.sessionId || params.gateway_session_id === voice.sessionId)
-
-  return {
-    approval: {
-      id: first.request.id,
-      params: { description: params.description ?? null, command: params.command ?? null, tool_name: params.tool_name ?? null, choices: params.choices ?? null, allow_permanent: params.allow_permanent ?? null, allow_session: params.allow_session ?? null },
-      voice: spoken
-    },
-    waiting: approvals.length - 1
-  }
-}
 
 /** Answer an approval from the pet: only a pending approval, only with an answer its card offers. */
 export function answerApproval(id: unknown, choice: unknown): boolean {
@@ -110,23 +50,6 @@ export function answerApproval(id: unknown, choice: unknown): boolean {
   resolveRequest(entry.request.id, { choice })
 
   return true
-}
-
-/** The window Hermes is working in, from a command it ran there. */
-export function followFrom(event: CommandEvent | undefined): PetFollow | null {
-  const match = event ? FOLLOW_COMMAND.exec(event.command) : null
-
-  if (!event || !match || event.source !== 'agent' || !event.result.ok || QUIET_VERBS.has(match[2])) {
-    return null
-  }
-
-  const named = DOCUMENT_ARGS.map(key => event.args[key]).find((value): value is string => typeof value === 'string' && value.trim() !== '')
-
-  return { app: match[1] as PetFollowApp, document: named ? (named.trim().split(/[\\/]/).pop() ?? null) : null, at: event.ts }
-}
-
-export function followAlive(follow: PetFollow | null, now: number, working: boolean): boolean {
-  return Boolean(follow) && now - follow!.at < (working ? FOLLOW_WORKING_MS : FOLLOW_MS)
 }
 
 const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string')
@@ -434,6 +357,9 @@ async function sampleAutomations(): Promise<void> {
 }
 
 let slidesWatched = false
+
+/** Herald Slides is presenting in this window (desktop mode; panels mode asks the compositor). */
+export const heraldPresenting = (): boolean => presenting
 
 /** Herald Slides presenting, in this window: its store loads with the app, so only look once a Slides window is open. */
 function watchSlides(): void {

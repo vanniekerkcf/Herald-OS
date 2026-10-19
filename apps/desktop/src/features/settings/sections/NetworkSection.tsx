@@ -2,11 +2,13 @@ import { useStore } from '@nanostores/react'
 import { IconBrandSlack, IconPlugConnected, IconServer, IconTerminal2, IconWifi } from '@tabler/icons-react'
 import { useState } from 'react'
 import { GlassButton, Pill, type PillTone, Toggle } from '../../../components/ui/glass.tsx'
+import { logFailure } from '../../../lib/report.ts'
 import { type HermesStatusPayload, rest } from '../../../lib/rest.ts'
 import { useBackendData } from '../../../lib/use-async.ts'
 import { $backend } from '../../../store/backend.ts'
 import { $connection } from '../../../store/gateway.ts'
 import { notify } from '../../../store/notifications.ts'
+import { useT } from '../../../store/i18n.ts'
 import { errorText, InlineNote, markSaved, SectionTitle, SettingsGroup, SettingsRow } from './shared.tsx'
 
 interface McpServerRow {
@@ -21,19 +23,20 @@ interface McpServerRow {
 const phaseTone = (phase: string): PillTone => (phase === 'ready' ? 'ok' : phase === 'failed' ? 'danger' : phase === 'stopped' || phase === 'idle' ? 'muted' : 'warn')
 
 export function NetworkSection() {
+  const t = useT()
   const backend = useStore($backend)
   const connection = useStore($connection)
 
   return (
     <>
-      <SectionTitle title="Network" subtitle="The Hermes runtime this shell talks to, and what Hermes itself is connected to." />
+      <SectionTitle title={t('settings.section.network')} subtitle={t('settings.network.subtitle')} />
 
       <SettingsGroup title="Hermes runtime">
         <SettingsRow icon={<IconServer />} label="Backend" description={<span className="selectable font-mono text-[11.5px]">{backend.baseUrl ?? 'not running'}</span>} keywords="hermes runtime server status">
           <Pill tone={phaseTone(backend.phase)} dot>
             {backend.phase}
           </Pill>
-          <GlassButton size="sm" variant="ghost" onClick={() => void window.heraldOS.backend.restart()} aria-label="Restart Hermes">
+          <GlassButton size="sm" variant="ghost" onClick={() => void window.heraldOS.backend.restart().catch(logFailure('backend.restart'))} aria-label="Restart Hermes">
             Restart
           </GlassButton>
         </SettingsRow>
@@ -54,6 +57,12 @@ export function NetworkSection() {
           <InlineNote tone="info">
             Another app (Hermes Desktop, say) runs a Hermes gateway on this Hermes home (pid {backend.sharedGateway}). That is fine: Hermes runs each scheduled job once and keeps one messaging gateway. To share its backend
             too, start Herald OS with HERALD_OS_BACKEND_URL and HERALD_OS_BACKEND_TOKEN.
+          </InlineNote>
+        )}
+        {backend.runtime?.kind === 'attached' && backend.localFiles === false && (
+          <InlineNote tone="info">
+            This Hermes did not read a file Herald wrote on this computer, so Herald treats it as running elsewhere (another computer, through a tunnel, say): files you attach are uploaded to it, it works
+            in its own folders, and it knows your other files are out of its reach. Canvas AI needs a Hermes that reads this computer's files. If this one does run here, update it with `hermes update`.
           </InlineNote>
         )}
       </SettingsGroup>

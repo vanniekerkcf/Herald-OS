@@ -1,5 +1,7 @@
 import { defineCommands, type OsCommand } from '../store/os-commands.ts'
 import { automationCommands } from './automations.ts'
+import { botCommands } from './bots.ts'
+import { calcCommands } from './calc.ts'
 import { canvasCommands } from './canvas.ts'
 import { captureCommands } from './capture.ts'
 import { connectionCommands } from './connections.ts'
@@ -15,6 +17,8 @@ import { navigationCommands } from './navigation.ts'
 import { officeCommands } from './office.ts'
 import { openCommands } from './open.ts'
 import { petCommands } from './pet.ts'
+import { requestCommands } from './requests.ts'
+import { roomCommands } from './room.ts'
 import { studioCommands } from './studio.ts'
 import { screenCommands } from './screen.ts'
 import { sheetsCommands } from './sheets.ts'
@@ -33,6 +37,7 @@ export const commandGroups: Record<string, readonly OsCommand[]> = {
   navigation: navigationCommands,
   edit: editCommands,
   hermes: hermesCommands,
+  bots: botCommands,
   memory: memoryCommands,
   files: filesCommands,
   automations: automationCommands,
@@ -57,7 +62,10 @@ export const commandGroups: Record<string, readonly OsCommand[]> = {
   docs: docsCommands,
   sheets: sheetsCommands,
   slides: slidesCommands,
-  pet: petCommands
+  pet: petCommands,
+  requests: requestCommands,
+  room: roomCommands,
+  calc: calcCommands
 }
 
 let registered = false

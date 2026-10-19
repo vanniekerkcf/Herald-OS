@@ -55,9 +55,33 @@ describe('runCommand', () => {
     expect($commandLog.get()[0]).toMatchObject({ command: 'test.echo', source: 'voice', args: { text: 'hello', loud: true, mode: 'fast' } })
   })
 
+  it('logs the live Hermes session that asked, and none when the caller names none', async () => {
+    const agent = { source: 'agent', session: 'a1b2c3d4' } as const
+
+    await runCommand('test.echo', { text: 'hello' }, agent)
+    expect($commandLog.get()[0]).toMatchObject({ command: 'test.echo', source: 'agent', session: 'a1b2c3d4' })
+
+    await runCommand('nope.nothing', {}, agent)
+    expect($commandLog.get()[0]).toMatchObject({ command: 'nope.nothing', result: { ok: false }, session: 'a1b2c3d4' })
+
+    await runCommand('test.echo', {}, agent)
+    expect($commandLog.get()[0]).toMatchObject({ command: 'test.echo', result: { ok: false }, session: 'a1b2c3d4' })
+
+    await runCommand('test.echo', { text: 'hello' }, { source: 'voice' })
+    expect($commandLog.get()[0]).toMatchObject({ source: 'voice', session: null })
+
+    await runCommand('test.echo', { text: 'hello' }, { source: 'agent', session: null })
+    expect($commandLog.get()[0].session).toBeNull()
+  })
+
   it('never throws', async () => {
     expect(await runCommand('test.boom', {}, { source: 'agent' })).toMatchObject({ ok: false, error: 'kaboom' })
     expect(await runCommand('nope.nothing', {}, { source: 'agent' })).toMatchObject({ ok: false, error: 'Unknown command "nope.nothing"' })
+  })
+
+  it("reports main's error without the IPC prefix", async () => {
+    defineCommands([{ id: 'test.ipc', title: 'IPC', description: '', tier: 'act', args: [], hidden: true, run: () => Promise.reject(new Error("Error invoking remote method 'herald-os:capture:region': Error: Herald OS needs Screen Recording permission. Turn it on.")) }])
+    expect(await runCommand('test.ipc', {}, { source: 'agent' })).toMatchObject({ ok: false, error: 'Herald OS needs Screen Recording permission. Turn it on.' })
   })
 
   it('lists commands without hidden ones by default and rejects bad ids', () => {

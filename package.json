@@ -1,6 +1,6 @@
 {
   "name": "herald-os",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.5",
   "private": true,
   "description": "Herald OS: an agent-native operating system built on Hermes Agent.",
   "license": "MIT",
@@ -29,6 +29,9 @@
     "exceljs": {
       "unzipper": "0.12.5",
       "uuid": "11.1.1"
+    },
+    "pptxgenjs": {
+      "image-size": "2.0.4"
     },
     "usocket": {
       "node-gyp": "12.4.0"

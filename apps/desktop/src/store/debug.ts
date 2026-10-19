@@ -18,6 +18,8 @@ import { $petPrefs } from '../features/pet/actions.ts'
 import { applyPetStats, pulsePet } from '../features/pet/brain.ts'
 import { $petInfo } from '../features/pet/info.ts'
 import { $petSnapshot, petAct } from '../features/pet/transport.ts'
+import { summarizeRoom } from '../features/room/model/summary.ts'
+import { $room, refreshRoomOnce, retainRoom } from '../features/room/store.ts'
 
 /** Installed only in development builds (see boot.ts). */
 export function installDebugHook(): void {
@@ -53,6 +55,7 @@ export function installDebugHook(): void {
         pulse: pulsePet,
         stats: applyPetStats
       },
+      room: { state: () => $room.get(), summary: () => summarizeRoom($room.get(), Date.now()), retain: retainRoom, refresh: refreshRoomOnce },
       voice: {
         start: startVoice,
         end: endConversation,

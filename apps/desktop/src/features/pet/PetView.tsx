@@ -1,8 +1,11 @@
 import { IconBattery1, IconBox, IconDatabaseExclamation, IconNote, IconX } from '@tabler/icons-react'
-import { type CSSProperties, type DragEvent, type HTMLAttributes, type RefObject, useState } from 'react'
+import { type CSSProperties, type DragEvent, type HTMLAttributes, type RefObject, useLayoutEffect, useRef, useState } from 'react'
 import type { PetActivity, PetDropSuggestionId, PetSnapshot } from '../../../shared/pet.ts'
 import { cn } from '../../lib/cn.ts'
+import { takeRequestFocus } from '../../lib/request-focus.ts'
+import { requestShortcut } from '../../lib/request-keys.ts'
 import { ApprovalCard } from '../../shell/RequestHost.tsx'
+import { useT } from '../../store/i18n.ts'
 import { dropAction, dropSuggestions } from './drops.ts'
 import type { PetDrop, PetExtras, PetUi } from './hooks.ts'
 import { PetBubble } from './PetBubble.tsx'
@@ -98,6 +101,25 @@ export interface PetViewProps {
   style?: CSSProperties
 }
 
+/**
+ * The approval in the pet's hands. It never takes the focus as it appears; the request shortcut can
+ * move the focus to it, and when it goes the focus returns to where it came from. Keyed by the
+ * approval, so the next one is a new card and never inherits the focus on this one's answers.
+ */
+export function PetApprovalCard({ approval, waiting }: { approval: NonNullable<PetSnapshot['approval']>; waiting: number }) {
+  const t = useT()
+  const card = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => (card.current ? takeRequestFocus(card.current, { take: false }) : undefined), [])
+
+  return (
+    <div ref={card} role="group" aria-label={t('requests.card.approval')} aria-keyshortcuts={requestShortcut().aria} data-request-card={approval.id} tabIndex={-1} className="float pointer-events-auto w-[360px] rounded-2xl p-4 outline-none animate-rise">
+      <ApprovalCard id={approval.id} params={approval.params} voiceHint={approval.voice} onChoice={choice => petAct({ type: 'answer', id: approval.id, choice })} />
+      {waiting > 0 && <div className="mt-2 text-right text-[11px] text-fg-3">{waiting} more {waiting === 1 ? 'approval' : 'approvals'} waiting</div>}
+    </div>
+  )
+}
+
 /** The pet and what it holds: the approval card, its chat, what a dropped file can become, or a few words. */
 export function PetView({ sheet, scale, snapshot, ui, extras, layout, pose, poseSince, rest, reduced, paused, dropping, onDropping, spriteProps, groupRef, inputRef, className, style }: PetViewProps) {
   const approval = snapshot.approval
@@ -115,10 +137,7 @@ export function PetView({ sheet, scale, snapshot, ui, extras, layout, pose, pose
 
   const extrasNode =
     extras === 'card' && approval ? (
-      <div className="float pointer-events-auto w-[360px] rounded-2xl p-4 animate-rise">
-        <ApprovalCard id={approval.id} params={approval.params} voiceHint={approval.voice} autoFocus={false} onChoice={choice => petAct({ type: 'answer', id: approval.id, choice })} />
-        {snapshot.approvalsWaiting > 0 && <div className="mt-2 text-right text-[11px] text-fg-3">{snapshot.approvalsWaiting} more waiting</div>}
-      </div>
+      <PetApprovalCard key={approval.id} approval={approval} waiting={snapshot.approvalsWaiting} />
     ) : extras === 'drop' && ui.drop ? (
       <DropPanel drop={ui.drop} onPick={(suggestion, text) => pick(ui.drop!, suggestion, text)} onClose={() => ui.setDrop(null)} />
     ) : extras === 'bubble' ? (
@@ -189,11 +208,11 @@ export function PetView({ sheet, scale, snapshot, ui, extras, layout, pose, pose
           </span>
         )}
         {note && (
-          <span className="group/note absolute bottom-0 left-0 flex items-center" onPointerDown={stop} onClick={stop}>
+          <span className="group/reveal-row absolute bottom-0 left-0 flex items-center" onPointerDown={stop} onClick={stop}>
             <button type="button" title={note.text} aria-label={note.text} onClick={() => petAct({ type: 'openNote' })} className="flex size-6 items-center justify-center rounded-full bg-bg-elevated text-accent-strong shadow hover:bg-surface-3">
               {note.kind === 'update' ? <IconBox size={14} /> : <IconNote size={14} />}
             </button>
-            <button type="button" aria-label="Not now" title="Not now" onClick={() => petAct({ type: 'dismissNote' })} className="ml-0.5 hidden size-4 items-center justify-center rounded-full bg-bg-elevated text-fg-3 group-hover/note:flex hover:text-fg">
+            <button type="button" aria-label="Not now" title="Not now" onClick={() => petAct({ type: 'dismissNote' })} className="reveal ml-0.5 flex size-4 items-center justify-center rounded-full bg-bg-elevated text-fg-3 hover:text-fg">
               <IconX size={10} />
             </button>
           </span>

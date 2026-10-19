@@ -3,8 +3,9 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
-import { IPC, type OsControlReply, type OsControlRequest } from '../../shared/ipc.ts'
+import { IPC, type OsControlReply, type OsControlRequest, type ShellCommand } from '../../shared/ipc.ts'
 import { log } from '../log.ts'
+import type { ActivityHub } from '../room/activity.ts'
 
 /*
  * OS control: how anything outside the renderer (the agent's `os_ui` tool through the bridge
@@ -17,13 +18,15 @@ import { log } from '../log.ts'
  *   runs on its own under the Herald OS data dir.
  *
  * Requests carry a per-launch token that main also gives the backend (HERALD_OS_CONTROL_TOKEN), so a
- * stray local process cannot drive the UI even though the socket is user-only (0600).
+ * stray local process cannot drive the UI even though the socket is user-only (0600). Hermes
+ * processes outside Herald send `activity` under a token of their own (electron/room/activity.ts),
+ * which reports live steps and runs nothing.
  */
 
 const REPLY_TIMEOUT_MS = 8_000
-/** Herald Canvas and Herald Office commands load, render and save whole images and documents. */
+/** Herald Canvas and Herald Office commands load, render and save whole images and documents; Herald Calc's plots may read a closed workbook. */
 const CANVAS_TIMEOUT_MS = 90_000
-const LONG_COMMAND = /^(canvas|docs|sheets|slides|office)\./
+const LONG_COMMAND = /^(canvas|docs|sheets|slides|office|calc)\./
 
 export class OsCommandBridge {
   private readonly pending = new Map<string, { resolve: (reply: OsControlReply) => void; timer: ReturnType<typeof setTimeout> }>()
@@ -41,7 +44,7 @@ export class OsCommandBridge {
     })
   }
 
-  private send(request: { kind: 'run'; command: string; args: Record<string, unknown>; source: 'agent' | 'cli' | 'plugin' } | { kind: 'list' } | { kind: 'state' }): Promise<OsControlReply> {
+  private send(request: { kind: 'run'; command: string; args: Record<string, unknown>; source: 'agent' | 'cli' | 'plugin'; session: string | null } | { kind: 'list' } | { kind: 'state' }): Promise<OsControlReply> {
     const win = this.getWindow()
 
     if (!win || win.isDestroyed()) {
@@ -63,8 +66,8 @@ export class OsCommandBridge {
     })
   }
 
-  run(command: string, args: Record<string, unknown>, source: 'agent' | 'cli' | 'plugin'): Promise<OsControlReply> {
-    return this.send({ kind: 'run', command, args, source })
+  run(command: string, args: Record<string, unknown>, source: 'agent' | 'cli' | 'plugin', session: string | null = null): Promise<OsControlReply> {
+    return this.send({ kind: 'run', command, args, source, session })
   }
 
   list(): Promise<OsControlReply> {
@@ -82,6 +85,17 @@ export interface UiControlRequest {
   command?: string
   args?: unknown
   source?: string
+  /** The live Hermes UI session whose tool sent a `ui` request; bridges from before it send none. */
+  session?: unknown
+}
+
+/** A Hermes UI session id as the bridge sends it (the tui_gateway's `sid`). */
+const SESSION_ID = /^[A-Za-z0-9_.:-]{1,128}$/
+
+function requestSession(value: unknown): string | null {
+  const session = typeof value === 'string' ? value.trim() : ''
+
+  return SESSION_ID.test(session) ? session : null
 }
 
 let controlToken = ''
@@ -102,7 +116,7 @@ export function isUiRequest(cmd: string): boolean {
 }
 
 /** Serve one `ui*` request through the bridge; `null` when `cmd` is not a UI request. */
-export async function handleUiRequest(request: UiControlRequest, bridge: OsCommandBridge): Promise<Record<string, unknown> | null> {
+export async function handleUiRequest(request: UiControlRequest, bridge: Pick<OsCommandBridge, 'run' | 'list' | 'state'>): Promise<Record<string, unknown> | null> {
   if (!isUiRequest(request.cmd)) {
     return null
   }
@@ -120,7 +134,7 @@ export async function handleUiRequest(request: UiControlRequest, bridge: OsComma
       }
 
       const args = request.args && typeof request.args === 'object' && !Array.isArray(request.args) ? (request.args as Record<string, unknown>) : {}
-      reply = await bridge.run(request.command, args, request.source === 'cli' ? 'cli' : 'agent')
+      reply = await bridge.run(request.command, args, request.source === 'cli' ? 'cli' : 'agent', requestSession(request.session))
 
       break
     }
@@ -145,6 +159,102 @@ export async function handleUiRequest(request: UiControlRequest, bridge: OsComma
   return { ok: true, result }
 }
 
+export interface DesktopControlOptions {
+  bridge: Pick<OsCommandBridge, 'run' | 'list' | 'state'>
+  /** `activity` from Hermes processes outside Herald, under a token of its own. */
+  activity: Pick<ActivityHub, 'handle'>
+  /** Hand a ShellCommand to the Hermes window. */
+  relay: (command: ShellCommand) => void
+}
+
+/**
+ * The desktop control socket's requests. No CLI talks to this socket (the Linux one serves
+ * `herald-os`), so every client but a Hermes process reporting `activity` is the backend, and
+ * everything else needs the launch token.
+ */
+export function desktopControlHandler({ bridge, activity, relay }: DesktopControlOptions): (request: Record<string, unknown>) => Promise<Record<string, unknown>> {
+  return async request => {
+    if (request.cmd === 'activity') {
+      return activity.handle(request)
+    }
+
+    if (request.token !== osControlToken()) {
+      return { ok: false, error: 'invalid control token' }
+    }
+
+    const ui = await handleUiRequest(request as unknown as UiControlRequest, bridge)
+
+    if (ui) {
+      return ui
+    }
+
+    // A few CLI conveniences the Linux socket also offers, relayed as ShellCommands.
+    const cmd = String(request.cmd ?? '')
+    const args = Array.isArray(request.args) ? (request.args as string[]) : []
+
+    switch (cmd) {
+      case 'page':
+        relay({ type: 'show-page', args })
+
+        return { ok: true }
+      case 'notify':
+        relay({ type: 'notify', args })
+
+        return { ok: true }
+      case 'voice':
+        relay({ type: 'voice', args: [args[0] ?? 'toggle'] })
+
+        return { ok: true }
+      case 'os':
+        relay({ type: 'os', args: [args[0]], payload: args[1] ? (JSON.parse(args[1]) as Record<string, unknown>) : undefined })
+
+        return { ok: true }
+      default:
+        return { ok: false, error: `unknown command ${cmd}` }
+    }
+  }
+}
+
+/** The longest line either control socket holds while it waits for the newline; a client that sends more is cut off. */
+export const CONTROL_LINE_MAX = 1024 * 1024
+
+/** Read one JSON-lines connection: every complete line is answered with one line. */
+export function serveJsonLines(connection: net.Socket, answer: (line: string) => Promise<Record<string, unknown>>): void {
+  let pending = ''
+  let pendingBytes = 0
+
+  connection.setEncoding('utf8')
+  connection.on('data', (chunk: string) => {
+    let start = 0
+    let end = chunk.indexOf('\n')
+
+    while (end >= 0) {
+      const line = (pending + chunk.slice(start, end)).trim()
+      pending = ''
+      pendingBytes = 0
+      start = end + 1
+      end = chunk.indexOf('\n', start)
+
+      if (line) {
+        void answer(line).then(reply => {
+          if (!connection.destroyed) {
+            connection.write(`${JSON.stringify(reply)}\n`)
+          }
+        })
+      }
+    }
+
+    const rest = chunk.slice(start)
+    pending += rest
+    pendingBytes += Buffer.byteLength(rest)
+
+    if (pendingBytes > CONTROL_LINE_MAX) {
+      connection.destroy()
+    }
+  })
+  connection.on('error', () => undefined)
+}
+
 /** A JSON-lines Unix socket server: one request object per line in, one reply object per line out. */
 export class OsControlServer {
   private server: net.Server | null = null
@@ -166,30 +276,7 @@ export class OsControlServer {
       }
     }
 
-    this.server = net.createServer(connection => {
-      let buffer = ''
-      connection.setEncoding('utf8')
-      connection.on('data', chunk => {
-        buffer += chunk
-        let index = buffer.indexOf('\n')
-
-        while (index >= 0) {
-          const line = buffer.slice(0, index).trim()
-          buffer = buffer.slice(index + 1)
-
-          if (line) {
-            void this.handleLine(line).then(reply => {
-              if (!connection.destroyed) {
-                connection.write(`${JSON.stringify(reply)}\n`)
-              }
-            })
-          }
-
-          index = buffer.indexOf('\n')
-        }
-      })
-      connection.on('error', () => undefined)
-    })
+    this.server = net.createServer(connection => serveJsonLines(connection, line => this.handleLine(line)))
     this.server.on('error', error => log('os-control', `socket error: ${error.message}`))
     this.server.listen(this.socketPath, () => {
       fs.chmodSync(this.socketPath, 0o600)

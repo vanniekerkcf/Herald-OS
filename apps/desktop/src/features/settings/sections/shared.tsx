@@ -4,6 +4,7 @@ import type React from 'react'
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { Dropdown, GlassCard } from '../../../components/ui/glass.tsx'
 import { cn } from '../../../lib/cn.ts'
+import { useT } from '../../../store/i18n.ts'
 
 /*
  * Building blocks shared by every Settings section: the row/group vocabulary from the mockup,
@@ -16,10 +17,10 @@ import { cn } from '../../../lib/cn.ts'
 /** Timestamp of the last successful write made from the Settings page. */
 export const $settingsSavedAt = atom(0)
 
-export type SectionId = 'general' | 'appearance' | 'pet' | 'software' | 'plugins' | 'agents' | 'usage' | 'voice' | 'commands' | 'privacy' | 'notifications' | 'network' | 'storage' | 'accessibility' | 'about'
+export type SectionId = 'general' | 'appearance' | 'pet' | 'room' | 'software' | 'plugins' | 'agents' | 'usage' | 'voice' | 'commands' | 'privacy' | 'notifications' | 'network' | 'storage' | 'accessibility' | 'about'
 
 /** Section ids in nav order; kept here (not in SettingsPage) so commands can import them without the page. */
-export const SETTINGS_SECTION_IDS: readonly SectionId[] = ['general', 'appearance', 'pet', 'software', 'plugins', 'agents', 'usage', 'voice', 'commands', 'privacy', 'notifications', 'network', 'storage', 'accessibility', 'about']
+export const SETTINGS_SECTION_IDS: readonly SectionId[] = ['general', 'appearance', 'pet', 'room', 'software', 'plugins', 'agents', 'usage', 'voice', 'commands', 'privacy', 'notifications', 'network', 'storage', 'accessibility', 'about']
 
 /** A command (voice, agent) asked the Settings page to show a section (id) and optionally search. */
 export const $settingsFocus = atom<{ section?: string; query?: string; ts: number } | null>(null)
@@ -32,9 +33,7 @@ export function markSaved(): void {
   $settingsSavedAt.set(Date.now())
 }
 
-export function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
+export { errorText } from '../../../lib/error-text.ts'
 
 // ---- Search filter -------------------------------------------------------------------------
 
@@ -192,10 +191,24 @@ export function MenuDropdown<T extends string>({ label, items, value, onSelect, 
   const [open, setOpen] = useState(false)
   const ref = useDismiss(open, () => setOpen(false))
 
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false)
+    }
+  }, [disabled])
+
   return (
     <div ref={ref} className="relative">
-      <Dropdown label={<span className="max-w-[220px] truncate">{label}</span>} onClick={() => !disabled && setOpen(o => !o)} className={cn(disabled && 'opacity-50', className)} />
-      {open && (
+      <Dropdown
+        label={<span className="max-w-[220px] truncate">{label}</span>}
+        onClick={() => !disabled && setOpen(o => !o)}
+        disabled={disabled}
+        aria-disabled={disabled || undefined}
+        aria-haspopup="listbox"
+        aria-expanded={open && !disabled}
+        className={cn(disabled && 'opacity-50', className)}
+      />
+      {open && !disabled && (
         <div role="listbox" aria-label={ariaLabel} className={cn('float animate-pop absolute top-[calc(100%+6px)] right-0 z-30 min-w-[220px] rounded-lg p-1', menuClassName)}>
           {items.map(item => {
             const active = item.id === value
@@ -230,16 +243,17 @@ export function MenuDropdown<T extends string>({ label, items, value, onSelect, 
 
 /** −/+ numeric stepper matching the mockup. */
 export function Stepper({ value, onChange, min = 1, max = 99, disabled, label }: { value: number | null; onChange: (next: number) => void; min?: number; max?: number; disabled?: boolean; label: string }) {
+  const t = useT()
   const current = value ?? min
   const step = (delta: number) => onChange(Math.max(min, Math.min(max, current + delta)))
 
   return (
     <div className={cn('inline-flex h-8 items-stretch overflow-hidden rounded-lg border border-line bg-white/6', disabled && 'opacity-50')} role="group" aria-label={label}>
-      <button type="button" aria-label={`Decrease ${label}`} disabled={disabled || current <= min} onClick={() => step(-1)} className="flex w-8 items-center justify-center text-fg-2 hover:bg-white/10 hover:text-fg disabled:opacity-40">
+      <button type="button" aria-label={t('settings.decrease', { name: label })} disabled={disabled || current <= min} onClick={() => step(-1)} className="flex w-8 items-center justify-center text-fg-2 hover:bg-white/10 hover:text-fg disabled:opacity-40">
         <IconMinus size={14} />
       </button>
       <span className="flex min-w-9 items-center justify-center border-x border-line px-2 text-[12.5px] font-medium tabular-nums text-fg">{value ?? '—'}</span>
-      <button type="button" aria-label={`Increase ${label}`} disabled={disabled || current >= max} onClick={() => step(1)} className="flex w-8 items-center justify-center text-fg-2 hover:bg-white/10 hover:text-fg disabled:opacity-40">
+      <button type="button" aria-label={t('settings.increase', { name: label })} disabled={disabled || current >= max} onClick={() => step(1)} className="flex w-8 items-center justify-center text-fg-2 hover:bg-white/10 hover:text-fg disabled:opacity-40">
         <IconPlus size={14} />
       </button>
     </div>
@@ -254,8 +268,12 @@ export function RadioCard({ icon, label, description, selected, onSelect, disabl
         {icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-medium text-fg">{label}</span>
-        <span className="block truncate text-[12px] text-fg-3">{description}</span>
+        <span className="block truncate text-[13px] font-medium text-fg" title={label}>
+          {label}
+        </span>
+        <span className="block truncate text-[12px] text-fg-3" title={description}>
+          {description}
+        </span>
       </span>
       <span aria-hidden="true" className={cn('flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors', selected ? 'border-accent-strong' : 'border-line-strong')}>
         {selected && <span className="size-2 rounded-full bg-accent-strong shadow-[0_0_8px_currentColor]" />}

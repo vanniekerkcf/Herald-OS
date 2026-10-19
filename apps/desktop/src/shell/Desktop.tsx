@@ -36,6 +36,8 @@ const CanvasWindow = lazy(() => import('../features/canvas/CanvasWindow.tsx').th
 const DocsWindow = lazy(() => import('../features/office/docs/DocsWindow.tsx').then(m => ({ default: m.DocsWindow })))
 const SheetsWindow = lazy(() => import('../features/office/sheets/SheetsWindow.tsx').then(m => ({ default: m.SheetsWindow })))
 const SlidesWindow = lazy(() => import('../features/office/slides/SlidesWindow.tsx').then(m => ({ default: m.SlidesWindow })))
+const RoomWindow = lazy(() => import('../features/room/RoomWindow.tsx').then(m => ({ default: m.RoomWindow })))
+const CalcWindow = lazy(() => import('../features/calc/CalcWindow.tsx').then(m => ({ default: m.CalcWindow })))
 
 function FloatingContent({ win }: { win: OSWindow }) {
   switch (win.appId) {
@@ -44,7 +46,7 @@ function FloatingContent({ win }: { win: OSWindow }) {
     case 'system':
       return <SystemSurface />
     case 'chat-popout':
-      return <ChatPopout sessionId={typeof win.payload?.sessionId === 'string' ? win.payload.sessionId : undefined} />
+      return <ChatPopout sessionId={typeof win.payload?.sessionId === 'string' ? win.payload.sessionId : undefined} profile={typeof win.payload?.profile === 'string' ? win.payload.profile : undefined} />
     case 'web':
       return <WebWindow win={win} />
     case 'studio':
@@ -63,6 +65,10 @@ function FloatingContent({ win }: { win: OSWindow }) {
       return <SheetsWindow payload={win.payload} />
     case 'slides':
       return <SlidesWindow payload={win.payload} />
+    case 'room':
+      return <RoomWindow active={win.phase !== 'minimized'} />
+    case 'calc':
+      return <CalcWindow payload={win.payload} />
     default:
       return null
   }

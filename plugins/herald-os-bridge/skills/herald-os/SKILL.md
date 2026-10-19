@@ -100,6 +100,7 @@ read `skill_view name="herald-os-bridge:herald-docs"`,
 | "Open Apps" / "Show all apps" | `os_ui` run `overlay.applications` |
 | "Build / create / make me a website (app, game) for …" | `os_ui` run `build.start goal=...` (new project + Studio) |
 | "Show me the code" / "Show me what you're doing" | `os_ui` run `studio.open` |
+| "What's 15% of 84.50?" / "5 km in miles" / "100 USD in BRL" / "Days until Dec 25" | `calc` action=eval text=... (any arithmetic, percentage, unit, currency, date or time-zone math; show its `steps`); "plot sin(x)" for the person to see → `os_ui` run `calc.plot`; details in the `herald-calc` skill |
 | "What's using the most CPU / memory?" | `system_processes` action=top sort=cpu (or memory); summarise the top 3 with numbers |
 | "What's on port 3000?" | `system_processes` action=port port=3000 |
 | "Kill the process on port 3000" | `system_kill_process` port=3000 (the user confirms) |
@@ -187,6 +188,15 @@ logs from `journalctl`, trash from `gio trash`, notifications from `notify-send`
   `camera.show`, `capture.color` (the person clicks a colour; you get #rrggbb), `capture.qr` and
   `capture.text` (OCR; the person selects the area); on Linux also `capture.transcode` (file,
   gif|mp4|webm) and `capture.share`. Use `screen.askRegion` to have the person pick what to show you.
+- `capture.qr` gives you ordinary links and text in full (`text`). For a 2FA setup code, Wi-Fi
+  details, a card number or anything that looks like a password or key you get `kind` and
+  `description` ("a 2FA setup code for GitHub") and `onClipboard: true`: the contents are on the
+  clipboard for the person to paste where they belong. Tell them that; never ask them to paste or
+  read the secret to you. A link that carries a secret comes as `link`, with the secret parts (a
+  token, a password, a Zoom passcode) taken out, or as its host alone in `description` when the
+  secret is in the middle of it; the whole link is on the clipboard. The summary shortens a long
+  link with …; use `text` or `link` for the whole of it. When the person selected
+  several codes nothing is copied: ask them to select just one.
 - Switches (both platforms): `os_ui` run `dnd.set`, `awake.set` (stay awake), `nightlight.set`
   (Linux) or `screensaver.set` with `{"enabled": true|false}`; `idle.set` changes when the screen
   locks, turns off and sleeps (minutes).
@@ -210,6 +220,7 @@ the tool is tiered, audited, and returns the CLI's output. It is unavailable on 
 | "What time is it?" / "Battery?" / "Weather?" | `system_os` action=notice kind=time / battery / weather |
 | "Take a screenshot" / "Read the text on my screen" | `system_os` action=screenshot / ocr |
 | "Lock the screen" / "Put the computer to sleep" | `system_os` action=lock / suspend |
+| "My sound stopped working" / "The Wi-Fi keeps dropping" / "My headset won't reconnect" / "The touchpad is dead" | Offer to restart it first, then `system_os` action=restart device=sound / wifi / bluetooth / touchpad |
 | "Which themes are there?" / "Switch to the X theme" | `system_os` action=theme_list / theme_set name=X / theme_current |
 | "Update Herald OS" | `system_os` action=update |
 | "Show my missions" / "Open memory" | `system_os` action=show_page page=missions (overview, hermes, missions, memory, files, automations, connections, settings) |
@@ -218,8 +229,13 @@ the tool is tiered, audited, and returns the CLI's output. It is unavailable on 
 | "Go to my Work space" | `system_os` action=focus_workspace name=work |
 | "Close this window" | `system_os` action=close_focused_window |
 
-- `install_app`, `install_webapp`, `remove_app`, `remove_webapp`, `reminders_clear`, `update` and
-  `suspend` ask the user for confirmation before running; tell the user that is expected and do not
-  try to route around a denial.
+- `install_app`, `install_webapp`, `remove_app`, `remove_webapp`, `reminders_clear`, `update`,
+  `restart` and `suspend` ask the user for confirmation before running; tell the user that is
+  expected and do not try to route around a denial. A sound restart cuts audio for a moment, a call's
+  too, so say so when offering it.
 - Installs and updates can take minutes; report the CLI output (what was installed, or the error).
+- When Wi-Fi, Bluetooth, sound or the touchpad "just stopped working", restarting that one part
+  (action=restart) comes before suggesting a reboot. The touchpad needs administrator rights: if
+  the result says nothing could ask for the password, tell the user to run
+  `herald-os restart touchpad` in a terminal.
 - `duration` accepts `90s`, `20m`, `1h`, `1h30m` or a plain number of minutes.

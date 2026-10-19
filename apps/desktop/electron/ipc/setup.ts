@@ -10,10 +10,13 @@ import { loadPty } from './terminal.ts'
  * First-boot setup on the Herald OS image: the image's first boot made the account (no password)
  * and installed Hermes; the person names it, sets a password, joins Wi-Fi and signs in to Hermes.
  * Nothing here needs root: `passwd` changes the person's own password (the current one is empty on
- * a new account), and the name Herald greets with lives in ~/.config/herald-os/name.
+ * a new account), and the name Herald greets with lives in ~/.config/herald-os/name. On a system
+ * switched from another bootc system the first boot leaves a login screen instead (firstboot.sh), so
+ * the account has a password already and setup asks only for the name.
  */
 
 const FIRSTBOOT_DONE = '/var/lib/herald-os/firstboot-done'
+const LOGIN_SCREEN = '/var/lib/herald-os/login-screen'
 const configDir = () => path.join(os.homedir(), '.config', 'herald-os')
 const doneFile = () => path.join(configDir(), 'setup-done')
 export const nameFile = (): string => path.join(configDir(), 'name')
@@ -28,7 +31,7 @@ export function setupState(): SetupState {
     // Not named yet.
   }
 
-  return { needed: process.platform === 'linux' && image && !fs.existsSync(doneFile()), user: os.userInfo().username, name }
+  return { needed: process.platform === 'linux' && image && !fs.existsSync(doneFile()), user: os.userInfo().username, name, signedIn: fs.existsSync(LOGIN_SCREEN) }
 }
 
 /** What `passwd` asks (LANG=C), most specific first: "Retype new password:" also ends in "new password:". */
@@ -50,32 +53,53 @@ export function passwdReply(screen: string, password: string, current: string): 
   return null
 }
 
-/** `passwd` for this account, answered through a terminal; the reason when it refuses (too short, too simple). */
+const DETAIL_MAX = 200
+
+/** pwquality's reason as the renderer may show it: no control characters (a terminal's escapes), and short. */
+export function refusalDetail(line: string): string {
+  return line.replace(/\p{Cc}/gu, '').trim().slice(0, DETAIL_MAX).trim()
+}
+
+/**
+ * `passwd` for this account, answered through a terminal; why it failed as a reason code, with
+ * pwquality's reason when it refused (too short, too simple). passwd's own last line goes only to
+ * the log: it is English and may be anything.
+ */
 export function changePassword(password: string, current = ''): Promise<SetupResult> {
   const pty = loadPty()
 
   if (!pty) {
-    return Promise.resolve({ ok: false, error: 'The terminal library is missing, so the password cannot be set here; run `passwd` in a terminal.' })
+    return Promise.resolve({ ok: false, reason: 'noTerminal' })
   }
 
   return new Promise(resolve => {
     const child = pty.spawn('passwd', [], { name: 'xterm', cols: 100, rows: 24, cwd: os.homedir(), env: { ...process.env, LANG: 'C', LC_ALL: 'C' } })
     let screen = ''
-    let refusal = ''
+    // pwquality's reason once it refused; blank when the reason was nothing but control characters.
+    let refusal: string | null = null
     const timer = setTimeout(() => {
       child.kill()
-      resolve({ ok: false, error: 'passwd did not finish' })
+      resolve({ ok: false, reason: 'timeout' })
     }, 30_000)
 
     child.onData(data => {
-      screen += data
-      const bad = /BAD PASSWORD: ([^\r\n]+)/.exec(screen)
+      if (refusal !== null) {
+        return
+      }
 
-      if (bad?.[1]) {
+      screen += data
+      const bad = /BAD PASSWORD: ([^\r\n]+)\r?\n/.exec(screen)
+
+      if (bad) {
         // pwquality refused it and would ask again; stop and say why.
-        refusal = bad[1].trim()
+        refusal = refusalDetail(bad[1])
         child.kill()
 
+        return
+      }
+
+      // The rest of the refusal is still to come; "BAD PASSWORD: " alone would pass for a prompt.
+      if (/BAD PASSWORD:[^\n]*$/.test(screen)) {
         return
       }
 
@@ -94,7 +118,7 @@ export function changePassword(password: string, current = ''): Promise<SetupRes
       } else {
         const last = screen.split(/\r?\n/).map(line => line.trim()).filter(Boolean).pop() ?? ''
         log('setup', `passwd exited ${exitCode}: ${refusal || last}`)
-        resolve({ ok: false, error: refusal ? `That password was refused: ${refusal}.` : last || 'passwd refused the change' })
+        resolve(refusal === null ? { ok: false, reason: 'failed' } : { ok: false, reason: 'refused', ...(refusal && { detail: refusal }) })
       }
     })
   })
@@ -113,7 +137,7 @@ export function registerSetupIpc(): void {
     const value = String(password ?? '')
 
     if (value.length < 8 || /[\r\n]/.test(value)) {
-      return { ok: false, error: 'Use at least 8 characters.' } satisfies SetupResult
+      return { ok: false, reason: 'tooShort' } satisfies SetupResult
     }
 
     return changePassword(value)

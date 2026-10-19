@@ -26,6 +26,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r apps/desktop/test-requirements.txt
       - name: Fetch the pinned Hermes Agent snapshot
         run: npm run sync-upstream
       - run: npm ci
@@ -45,7 +49,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: python -m pip install pytest pyyaml
+      - run: python -m pip install -r linux/tests/requirements.txt
       - name: pytest
         run: HERALD_OS_PYTHON="$(command -v python)" bash scripts/test-bridge.sh
 
@@ -64,6 +68,27 @@ jobs:
             esac
           done < <(git ls-files)
           exit "$failed"
+
+  signing:
+    name: Signing policy
+    runs-on: ubuntu-latest
+    # Pull requests cannot read COSIGN_PRIVATE_KEY, so the repository variable SIGNING_ENABLED says
+    # whether the image workflow signs; it and linux/image/cosign.pub must agree (#18).
+    env:
+      SIGNING_ENABLED: ${{ vars.SIGNING_ENABLED }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: cosign.pub and SIGNING_ENABLED agree
+        run: |
+          if [[ "$SIGNING_ENABLED" == "true" && ! -f linux/image/cosign.pub ]]; then
+            # Expected while signing is being turned on (docs/LINUX.md): images are signed, not yet verified.
+            echo "::warning::SIGNING_ENABLED is true but linux/image/cosign.pub is not committed yet: images are signed but machines do not verify them. Verify a signed image, then commit the public key."
+          fi
+          if [[ "$SIGNING_ENABLED" != "true" && -f linux/image/cosign.pub ]]; then
+            echo "::error::linux/image/cosign.pub is committed but SIGNING_ENABLED is not true: set COSIGN_PRIVATE_KEY and SIGNING_ENABLED=true first, or the image build would ship an unsigned image that refuses its own updates."
+            exit 1
+          fi
+          echo "Signing policy check passed (SIGNING_ENABLED=${SIGNING_ENABLED:-unset}, cosign.pub $([[ -f linux/image/cosign.pub ]] && echo present || echo absent))."
 
   secrets:
     name: Secret scan

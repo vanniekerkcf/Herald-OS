@@ -1,5 +1,6 @@
 import { atom } from 'nanostores'
-import { MicrophoneUnavailableError, subscribeMicrophone } from '../lib/voice/audio-capture.ts'
+import { microphoneDenied, MicrophoneUnavailableError, subscribeMicrophone } from '../lib/voice/audio-capture.ts'
+import { privacyPaneActions } from '../lib/privacy-pane.ts'
 import { earcons } from '../lib/voice/earcons.ts'
 import { FrameSlicer, int16ToBase64, TARGET_SAMPLE_RATE } from '../lib/voice/pcm.ts'
 import { $prefs, updatePrefs } from './backend.ts'
@@ -30,6 +31,8 @@ let paused = false
 let stopFeed: (() => void) | null = null
 let arming: Promise<void> | null = null
 let feedInFlight = 0
+/** The error the microphone failure set, so frames resuming clear that one and no other. */
+let microphoneError: string | null = null
 
 function patch(next: Partial<WakeSnapshot>): void {
   $wake.set({ ...$wake.get(), ...next })
@@ -38,25 +41,43 @@ function patch(next: Partial<WakeSnapshot>): void {
 async function startFeeding(frameLength: number): Promise<void> {
   stopFeeding()
   const slicer = new FrameSlicer(frameLength)
-  stopFeed = await subscribeMicrophone(frame => {
-    if (paused || !armed) {
-      return
-    }
+  stopFeed = await subscribeMicrophone(
+    frame => {
+      // Frames again after a failed reopen: the detector hears once more. Only the microphone's own
+      // error goes; one set since (another client owns the wake word, say) is still true.
+      if (microphoneError !== null) {
+        if ($wake.get().error === microphoneError) {
+          patch({ error: null })
+        }
 
-    for (const chunk of slicer.push(frame.pcm)) {
-      // Never let a slow backend pile up requests: drop frames when more than a few are in flight.
-      if (feedInFlight > 6) {
-        continue
+        microphoneError = null
       }
 
-      feedInFlight++
-      gatewayRequest('wake.feed', { pcm_b64: int16ToBase64(chunk), sample_rate: TARGET_SAMPLE_RATE }, 5000)
-        .catch(() => undefined)
-        .finally(() => {
-          feedInFlight--
-        })
+      if (paused || !armed) {
+        return
+      }
+
+      for (const chunk of slicer.push(frame.pcm)) {
+        // Never let a slow backend pile up requests: drop frames when more than a few are in flight.
+        if (feedInFlight > 6) {
+          continue
+        }
+
+        feedInFlight++
+        gatewayRequest('wake.feed', { pcm_b64: int16ToBase64(chunk), sample_rate: TARGET_SAMPLE_RATE }, 5000)
+          .catch(() => undefined)
+          .finally(() => {
+            feedInFlight--
+          })
+      }
+    },
+    // The feed stays subscribed and resumes on the next device change or pick; until then the
+    // wake word cannot hear, and Settings says why.
+    error => {
+      microphoneError = `Wake word cannot hear: ${error.message}`
+      patch({ error: microphoneError })
     }
-  })
+  )
 }
 
 function stopFeeding(): void {
@@ -110,7 +131,7 @@ async function arm(): Promise<void> {
       await gatewayRequest('wake.stop', {}).catch(() => undefined)
       const message = error instanceof MicrophoneUnavailableError ? error.message : `Microphone unavailable: ${error instanceof Error ? error.message : String(error)}`
       patch({ listening: false, error: message })
-      notify({ title: 'Wake word', body: message, level: 'warn' })
+      notify({ title: 'Wake word', body: message, level: 'warn', actions: microphoneDenied(error) ? privacyPaneActions('microphone') : undefined })
     }
   })().finally(() => {
     arming = null

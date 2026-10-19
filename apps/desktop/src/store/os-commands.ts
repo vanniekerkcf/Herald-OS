@@ -44,6 +44,8 @@ export interface CommandContext {
   source: CommandSource
   /** Set when one command delegates to another; nested runs are not logged (one caption per request). */
   nested?: boolean
+  /** The live Hermes session whose tool asked, which the bridge sends with each `ui` request; null otherwise. */
+  session?: string | null
 }
 
 /** An utterance pattern: `{arg}` marks a slot; an object form pins arguments the words imply ("turn off …"). */
@@ -79,6 +81,7 @@ export interface CommandEvent {
   command: string
   args: Record<string, unknown>
   source: CommandSource
+  session: string | null
   result: CommandResult
   ts: number
 }
@@ -206,8 +209,8 @@ export function remapArgNames(command: Pick<OsCommand, 'args'>, input: Record<st
   return { ...rest, [target.name]: value }
 }
 
-function record(command: string, args: Record<string, unknown>, source: CommandSource, result: CommandResult): void {
-  const event: CommandEvent = { id: ++eventCounter, command, args, source, result, ts: Date.now() }
+function record(command: string, args: Record<string, unknown>, context: CommandContext, result: CommandResult): void {
+  const event: CommandEvent = { id: ++eventCounter, command, args, source: context.source, session: context.session ?? null, result, ts: Date.now() }
   $commandLog.set([event, ...$commandLog.get()].slice(0, MAX_LOG))
 }
 
@@ -217,7 +220,7 @@ export async function runCommand(id: string, rawArgs: Record<string, unknown> | 
 
   if (!command) {
     const result = fail(`Unknown command "${id}"`)
-    record(id, rawArgs ?? {}, context.source, result)
+    record(id, rawArgs ?? {}, context, result)
 
     return result
   }
@@ -226,7 +229,7 @@ export async function runCommand(id: string, rawArgs: Record<string, unknown> | 
 
   if ('error' in validated) {
     const result = fail(validated.error)
-    record(id, rawArgs ?? {}, context.source, result)
+    record(id, rawArgs ?? {}, context, result)
 
     return result
   }
@@ -236,11 +239,12 @@ export async function runCommand(id: string, rawArgs: Record<string, unknown> | 
   try {
     result = await command.run(validated.args, context)
   } catch (error) {
-    result = fail(error instanceof Error ? error.message : String(error))
+    // ipcRenderer.invoke prefixes "Error invoking remote method '<channel>': Error: ".
+    result = fail((error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']*': (?:\w*Error: )?/, ''))
   }
 
   if (!context.nested) {
-    record(id, validated.args, context.source, result)
+    record(id, validated.args, context, result)
   }
 
   return result

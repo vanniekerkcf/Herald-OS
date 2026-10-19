@@ -66,10 +66,17 @@ vi.mock('../lib/voice/audio-capture.ts', async () => {
   return {
     $micOpen: atom(false),
     $micLevel: atom(0),
+    $micDevice: atom(null),
+    $inputDevices: atom({ devices: [], labelsAvailable: false }),
+    $captureNotice: atom(null),
+    refreshInputDevices: async () => ({ devices: [], labelsAvailable: false }),
+    setCaptureConversing: () => undefined,
+    acknowledgeCaptureNotice: () => undefined,
+    preferredInputDevice: () => null,
     MicrophoneUnavailableError: class extends Error {},
     setMicrophoneMuted: () => undefined,
     isMicrophoneOpen: () => true,
-    microphoneStream: async () => ({}),
+    holdMicrophoneStream: async () => ({ stream: {}, release: () => undefined }),
     subscribeMicrophone: async (listener: (frame: { pcm: Int16Array; level: number; ms: number }) => void) => {
       edges.microphone = listener
 
@@ -132,10 +139,10 @@ vi.mock('../lib/voice/speak-stream.ts', async () => {
     $speakLevel: atom(0),
     SpeakStream,
     stopFallbackAudio: () => undefined,
-    speakOnce: async (text: string) => {
-      if (text.trim()) {
-        edges.spoken.push(text.trim())
-      }
+    playbackTicket: () => () => true,
+    synthesizeOnce: async (text: string) => (text.trim() ? { src: text.trim(), provider: 'edge' } : null),
+    playClip: async (src: string) => {
+      edges.spoken.push(src)
     }
   }
 })

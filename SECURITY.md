@@ -37,13 +37,25 @@ These are the guarantees Herald OS aims for. Breaking one of them is a vulnerabi
 - **Shell windows stay on the shell.** They run with context isolation, the Chromium sandbox and
   no Node integration, and reach the system only through the preload API. They cannot navigate
   to any page but the shell's own, so a dropped file or a link cannot gain that API. Links open in
-  your browser, and only http(s) links open at all. Only the shell may use the microphone.
+  your browser, and only http(s) links open at all. Only the shell may use the microphone. Nothing
+  they read or write through that API reaches a credential store: `~/.ssh`, `~/.gnupg`, `~/.aws`,
+  keychains, browser profiles and cookies, and `.env` files and `auth.json` in the Hermes home,
+  among others, judged as written and after symlinks resolve, so a link to one, or the folder a
+  linked `~/.ssh` points to, counts as one. Single files and folder listings may come from
+  anywhere else; deep walks (project trees, watches, folder sizes) stay in the home folder, the
+  Hermes home and the temporary folders, skip credential stores, and never start at `/` or a
+  whole temporary folder. Writes stay in the home and temporary folders, and a rename or a trash
+  never moves a folder that holds a credential store, nor puts one where a credential store
+  belongs. Opening a file in another app or launching an app never reaches a credential store
+  either; revealing one shows the store's own entry in its folder, without opening it.
 - **Web content is contained.** Web windows, file viewers and the Studio preview have no preload,
   run in their own storage partitions, are denied every permission, cannot download files and
   cannot open pop-ups. The Studio preview loads web pages and files inside the project folder,
   nothing else. A local page reads only what is open for viewing: a page in a viewer, the files
-  open in viewers; a preview, the project folders being previewed. Paths are judged after symlinks
-  resolve, and anything else, such as `~/.hermes/.env`, looks missing.
+  open in viewers; a preview, the project folders being previewed, which sit strictly inside the
+  home folder and hold no credential store. Paths are judged after symlinks resolve, a credential
+  store is never served even from inside a previewed folder, and anything else, such as
+  `~/.hermes/.env`, looks missing.
 - **No credentials in the repository.** API keys and logins live in `~/.hermes`, managed by
   Hermes. CI scans the full history with [gitleaks](https://github.com/gitleaks/gitleaks); run
   `bash scripts/check-secrets.sh` to do the same locally.

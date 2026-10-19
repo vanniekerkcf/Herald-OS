@@ -2,11 +2,47 @@ import { type ChildProcess, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { clipboard, ClipboardItem, ipcMain, nativeImage, systemPreferences } from 'electron'
+import { app, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, shell, systemPreferences } from 'electron'
+import { translate } from '../../shared/i18n.ts'
 import { type CaptureTool, type CaptureToolResult, IPC, type RecordingState, type ScreenshotMode } from '../../shared/ipc.ts'
+import { describeQr } from '../../shared/qr.ts'
+import { privacyPaneUrl } from '../../shared/privacy-panes.ts'
+import { allowAttachments } from '../attachments.ts'
+import { assertReadable, checkWritable, writeChecked } from './fs.ts'
+import { menuLanguage } from '../i18n.ts'
 import { log } from '../log.ts'
 import { run } from '../platform/exec.ts'
-import { pickColourMac, readImageMac } from '../platform/mac-tools.ts'
+import { copyConcealedMac, pickColourMac, readImageMac } from '../platform/mac-tools.ts'
+
+export const QR_NOT_COPIED = 'The code was not copied: it looks secret, and the clipboard could not mark it as concealed, so clipboard managers would keep it.'
+
+/**
+ * One QR code goes on the clipboard, marked as concealed so clipboard managers skip it (QR codes
+ * often carry secrets, such as a 2FA setup code). Several are refused rather than run together.
+ * If the concealed copy fails, only ordinary links and text are copied plainly; a secret is not
+ * copied at all. The renderer only gets a description, so the contents never leave main.
+ */
+async function copyQrCode(codes: string[]): Promise<CaptureToolResult> {
+  if (codes.length !== 1) {
+    return { codes: codes.length }
+  }
+
+  const reading = describeQr(codes[0])
+
+  try {
+    await copyConcealedMac(codes[0])
+  } catch (error) {
+    log('capture', `concealed copy (${reading.kind}): ${error instanceof Error ? error.message : String(error)}`)
+
+    if (reading.text === undefined) {
+      throw new Error(QR_NOT_COPIED)
+    }
+
+    clipboard.writeText(codes[0])
+  }
+
+  return { codes: 1, qr: reading }
+}
 
 /** Screen grabs handed to Hermes; they only need to outlive the question about them. */
 export function capturesDir(): string {
@@ -29,6 +65,98 @@ function recordingsDir(): string {
   return process.platform === 'darwin' ? path.join(os.homedir(), 'Movies') : path.join(os.homedir(), 'Videos', 'Recordings')
 }
 
+const SCREEN_RECORDING_PANE = privacyPaneUrl('screen')
+
+let probedThisLaunch = false
+let explaining = false
+
+/** Tests start each case as a fresh launch. */
+export function resetScreenRecordingCheck(): void {
+  probedThisLaunch = false
+  explaining = false
+}
+
+/**
+ * Throws, after telling the person how to turn it on, unless macOS lets Herald OS read the screen.
+ * Without the permission `screencapture` still succeeds but sees only the wallpaper, the menu bar
+ * and Herald's own windows, so nothing it captures may reach Hermes or text recognition. The status
+ * reads `denied` until macOS has asked, and it asks only when a capture is attempted, so the first
+ * refusal in a launch takes one silent capture (then deletes it) to bring up macOS's prompt and put
+ * Herald OS in the pane's list. A change to the switch applies only after Herald OS reopens.
+ * `restricted` means something other than the person decides (a device-management profile, Screen
+ * Time or parental controls): macOS will not ask, so the person is told that instead.
+ */
+export async function ensureScreenRecording(): Promise<void> {
+  if (process.platform !== 'darwin') {
+    return
+  }
+
+  const status = systemPreferences.getMediaAccessStatus('screen')
+
+  if (status === 'granted') {
+    return
+  }
+
+  const restricted = status === 'restricted'
+
+  if (!restricted && !probedThisLaunch) {
+    probedThisLaunch = true
+    await probeScreenCapture()
+  }
+
+  const language = menuLanguage()
+  const title = translate(language, restricted ? 'permission.screen.restrictedTitle' : 'permission.screen.title')
+  const detail = translate(language, restricted ? 'permission.screen.restrictedDetail' : 'permission.screen.detail')
+  const buttons = restricted ? [translate(language, 'permission.screen.ok')] : [translate(language, 'permission.screen.open'), translate(language, 'permission.screen.reopen'), translate(language, 'permission.screen.notNow')]
+
+  // Not awaited: the capture fails now (Hermes gets the reason) while the explanation stays up.
+  if (!explaining) {
+    explaining = true
+    void dialog
+      .showMessageBox({ type: 'warning', message: title, detail, buttons, defaultId: 0, cancelId: buttons.length - 1 })
+      .then(({ response }) => {
+        if (restricted) {
+          return
+        }
+
+        if (response === 0) {
+          return shell.openExternal(SCREEN_RECORDING_PANE)
+        }
+
+        if (response === 1) {
+          app.relaunch()
+          app.quit()
+        }
+      })
+      .catch(error => log('capture', `screen recording explanation: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => {
+        explaining = false
+      })
+  }
+
+  throw new Error(`${title}. ${detail}`)
+}
+
+/** One silent capture, discarded, so macOS asks; its own folder, and nothing it does can fail the check. */
+async function probeScreenCapture(): Promise<void> {
+  let dir: string | null = null
+
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'herald-os-permission-'))
+    await run('screencapture', ['-x', '-t', 'png', path.join(dir, 'probe.png')], 15_000)
+  } catch (error) {
+    log('capture', `screen recording probe: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    if (dir) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true })
+      } catch (error) {
+        log('capture', `screen recording probe cleanup: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+}
+
 async function slurp(): Promise<string | null> {
   const region = await run('slurp', [], 300_000)
 
@@ -44,6 +172,7 @@ async function slurp(): Promise<string | null> {
  * slurp and grim on Wayland. Resolves with the file, or null when they pressed Escape.
  */
 export async function captureRegion(): Promise<string | null> {
+  await ensureScreenRecording()
   fs.mkdirSync(capturesDir(), { recursive: true })
   const file = path.join(capturesDir(), `region-${new Date().toISOString().replace(/[:.]/g, '-')}.png`)
 
@@ -90,6 +219,7 @@ function newestSince(dir: string, since: number): string | null {
 
 /** A screenshot saved where screenshots go; null when the person cancelled the selection. */
 export async function captureScreenshot(mode: ScreenshotMode): Promise<string | null> {
+  await ensureScreenRecording()
   const dir = screenshotsDir()
   fs.mkdirSync(dir, { recursive: true })
   const file = path.join(dir, `Screenshot ${stamp()}.png`)
@@ -161,6 +291,7 @@ class Recorder {
       return this.state()
     }
 
+    await ensureScreenRecording()
     const dir = recordingsDir()
     fs.mkdirSync(dir, { recursive: true })
     let command: string
@@ -238,7 +369,7 @@ const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bm
 const MAX_IMAGE_BYTES = 40 * 1024 * 1024
 
 /** Only images under the home folder or Herald OS's own capture folder are read or written here. */
-function userImagePath(target: string, mustExist: boolean): string {
+function userImagePath(target: string): string {
   const file = path.resolve(String(target).replace(/^file:\/\//, ''))
   const inside = [os.homedir(), capturesDir()].some(root => file === root || file.startsWith(`${root}${path.sep}`))
 
@@ -246,22 +377,35 @@ function userImagePath(target: string, mustExist: boolean): string {
     throw new Error('Only images in your home folder can be opened here')
   }
 
-  if (mustExist) {
-    const stat = fs.statSync(file)
+  return file
+}
 
-    if (!stat.isFile() || stat.size > MAX_IMAGE_BYTES) {
-      throw new Error(`${path.basename(file)} is too large to edit`)
-    }
+/** An image to read: a {@link userImagePath} that is not a credential store once its symlinks resolve. Read through the returned path. */
+async function readableImage(target: string): Promise<string> {
+  const { real } = await assertReadable(userImagePath(target))
+  const stat = fs.statSync(real)
+
+  if (!stat.isFile() || stat.size > MAX_IMAGE_BYTES) {
+    throw new Error(`${path.basename(real)} is too large to edit`)
   }
 
-  return file
+  return real
 }
 
 export function registerCaptureIpc(onRecording: (state: RecordingState) => void): void {
   const recorder = new Recorder(onRecording)
 
-  ipcMain.handle(IPC.captureRegion, () => captureRegion())
-  ipcMain.handle(IPC.captureScreenshot, (_event, mode: ScreenshotMode) => captureScreenshot(mode === 'window' || mode === 'screen' ? mode : 'region'))
+  // A capture is something the person may then ask Hermes about.
+  const attachable = (file: string | null): string | null => {
+    if (file) {
+      allowAttachments([file])
+    }
+
+    return file
+  }
+
+  ipcMain.handle(IPC.captureRegion, async () => attachable(await captureRegion()))
+  ipcMain.handle(IPC.captureScreenshot, async (_event, mode: ScreenshotMode) => attachable(await captureScreenshot(mode === 'window' || mode === 'screen' ? mode : 'region')))
   ipcMain.handle(IPC.captureRecord, (_event, action: 'start' | 'stop' | 'toggle', options: { region?: boolean; audio?: boolean } = {}) => {
     const start = action === 'start' || (action === 'toggle' && !recorder.state().recording)
 
@@ -293,7 +437,11 @@ export function registerCaptureIpc(onRecording: (state: RecordingState) => void)
     }
 
     try {
-      const lines = await readImageMac(file, tool === 'qr' ? 'codes' : 'text')
+      if (tool === 'qr') {
+        return await copyQrCode([...new Set(await readImageMac(file, 'codes'))])
+      }
+
+      const lines = await readImageMac(file, 'text')
       const text = lines.join('\n')
 
       if (text) {
@@ -305,22 +453,21 @@ export function registerCaptureIpc(onRecording: (state: RecordingState) => void)
       fs.rmSync(file, { force: true })
     }
   })
-  ipcMain.handle(IPC.captureReadImage, (_event, target: string) => nativeImage.createFromPath(userImagePath(target, true)).toDataURL())
-  ipcMain.handle(IPC.captureSaveImage, (_event, target: string, dataUrl: string) => {
-    const file = userImagePath(target, false)
+  ipcMain.handle(IPC.captureReadImage, async (_event, target: string) => nativeImage.createFromPath(await readableImage(target)).toDataURL())
+  ipcMain.handle(IPC.captureSaveImage, async (_event, target: string, dataUrl: string) => {
+    const checked = await checkWritable(userImagePath(target))
     const match = /^data:image\/png;base64,(.+)$/.exec(String(dataUrl))
 
     if (!match) {
       throw new Error('The image must be a PNG')
     }
 
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, Buffer.from(match[1], 'base64'))
+    await writeChecked(checked, Buffer.from(match[1], 'base64'))
 
-    return file
+    return checked.path
   })
   ipcMain.handle(IPC.captureCopyImage, async (_event, source: string) => {
-    const image = String(source).startsWith('data:image/') ? nativeImage.createFromDataURL(String(source)) : nativeImage.createFromPath(userImagePath(source, true))
+    const image = String(source).startsWith('data:image/') ? nativeImage.createFromDataURL(String(source)) : nativeImage.createFromPath(await readableImage(source))
 
     if (image.isEmpty()) {
       throw new Error('There is no image to copy')

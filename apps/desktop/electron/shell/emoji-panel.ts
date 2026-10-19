@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { type BrowserWindow, BrowserWindow as Window, globalShortcut, ipcMain, screen } from 'electron'
-import { IPC, type ShellCommand } from '../../shared/ipc.ts'
+import { IPC, type ShellCommand, type ShellSurface } from '../../shared/ipc.ts'
 import { log } from '../log.ts'
 import { devServerUrl, rendererIndex } from '../paths.ts'
 
@@ -23,6 +23,13 @@ export class EmojiPanel {
   register(): void {
     // The emoji surface closes itself after a pick or on Escape; nothing else in desktop mode does.
     ipcMain.handle(IPC.shellClose, () => this.hide())
+    // After a pick the panel is gone, so a pick left on the clipboard is reported in the Hermes window.
+    // Only the panel itself may relay, and only a notice.
+    ipcMain.handle(IPC.shellRelay, (event, target: ShellSurface, command: ShellCommand) => {
+      if (this.win && event.sender === this.win.webContents && target === 'main' && command?.type === 'notify') {
+        this.mainWindow()?.webContents.send(IPC.shellCommand, command)
+      }
+    })
 
     if (!globalShortcut.register(ACCELERATOR, () => this.toggle())) {
       log('emoji', `${ACCELERATOR} is taken by another app; the picker still opens inside Herald OS`)

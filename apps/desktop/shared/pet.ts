@@ -54,6 +54,9 @@ export function safePetSlug(slug: unknown): string {
 export interface InstalledPet {
   slug: string
   displayName: string
+  /** Changes whenever its spritesheet does, like the shown pet's `revision`. */
+  revision?: string | null
+  mime?: 'image/png' | 'image/webp' | null
 }
 
 /** The pet Hermes shows, as main resolves it from config.yaml and the pets folder. */

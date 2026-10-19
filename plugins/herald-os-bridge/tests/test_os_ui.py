@@ -9,8 +9,10 @@ import json
 import os
 import shutil
 import socket
+import sys
 import tempfile
 import threading
+import types
 
 import pytest
 
@@ -109,6 +111,31 @@ def decisions(plugin, monkeypatch):
     return seen
 
 
+@pytest.fixture
+def hermes_session(monkeypatch):
+    """Hermes's ``gateway.session_context``: ``bind(variables)`` binds a turn (variables it does not
+    name read as ""), ``bind(None)`` binds none, so the process environment answers."""
+    state: dict = {"bound": None}
+    package = types.ModuleType("gateway")
+    package.__path__ = []
+    module = types.ModuleType("gateway.session_context")
+
+    def get_session_env(name, default=""):
+        if state["bound"] is not None:
+            return state["bound"].get(name, "")
+        return os.environ.get(name, default)
+
+    module.get_session_env = get_session_env
+    monkeypatch.setitem(sys.modules, "gateway", package)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", module)
+    monkeypatch.delenv("HERMES_UI_SESSION_ID", raising=False)
+
+    def bind(variables: dict[str, str] | None) -> None:
+        state["bound"] = variables
+
+    return bind
+
+
 def test_run_read_command_through_socket(plugin, shell, decisions):
     tools = _mod(plugin, "tools")
     reply = json.loads(tools.handle_os_ui({"action": "run", "command": "page.open", "args": {"name": "memory"}}))
@@ -116,6 +143,39 @@ def test_run_read_command_through_socket(plugin, shell, decisions):
     assert reply["page"] == "memory"
     assert decisions[-1][0] == "os_ui" and decisions[-1][1].value == "read" and decisions[-1][2] == "page.open"
     assert shell.requests[-1]["token"] == "secret-token" and shell.requests[-1]["source"] == "agent"
+
+
+def test_a_command_names_the_live_session_hermes_bound(plugin, shell, decisions, hermes_session, monkeypatch):
+    tools, ui = _mod(plugin, "tools"), _mod(plugin, "ui")
+    hermes_session({"HERMES_UI_SESSION_ID": " a1b2c3d4 "})
+    reply = json.loads(tools.handle_os_ui({"action": "run", "command": "page.open", "args": {"name": "memory"}}))
+    assert reply["success"] is True
+    assert shell.requests[-1] == {"cmd": "ui", "command": "page.open", "args": {"name": "memory"}, "source": "agent", "session": "a1b2c3d4", "token": "secret-token"}
+    # Outside a Hermes runtime, the environment a session gave the process names it.
+    monkeypatch.setitem(sys.modules, "gateway.session_context", None)
+    monkeypatch.setenv("HERMES_UI_SESSION_ID", "tab-1")
+    ui.run_command("page.open", {"name": "memory"})
+    assert shell.requests[-1]["session"] == "tab-1"
+
+
+def test_a_command_without_a_bound_session_is_sent_as_before(plugin, shell, decisions, hermes_session, monkeypatch):
+    ui = _mod(plugin, "ui")
+    before = {"cmd": "ui", "command": "page.open", "args": {"name": "memory"}, "source": "agent", "token": "secret-token"}
+    for variables in (None, {}, {"HERMES_UI_SESSION_ID": "   "}):
+        hermes_session(variables)
+        ui.run_command("page.open", {"name": "memory"})
+        assert shell.requests[-1] == before
+    monkeypatch.setitem(sys.modules, "gateway.session_context", None)
+    ui.run_command("page.open", {"name": "memory"})
+    assert shell.requests[-1] == before
+
+
+def test_listing_and_state_never_name_a_session(plugin, shell, decisions, hermes_session):
+    tools = _mod(plugin, "tools")
+    hermes_session({"HERMES_UI_SESSION_ID": "a1b2c3d4"})
+    assert json.loads(tools.handle_os_ui({"action": "list"}))["success"] is True
+    assert json.loads(tools.handle_os_ui({"action": "state"}))["page"] == "overview"
+    assert shell.requests == [{"cmd": "ui-list", "token": "secret-token"}, {"cmd": "ui-state", "token": "secret-token"}]
 
 
 def test_tier_comes_from_the_catalogue(plugin, shell, decisions):

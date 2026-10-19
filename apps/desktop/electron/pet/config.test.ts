@@ -26,6 +26,12 @@ describe('the pet Hermes shows', () => {
     return dir
   }
 
+  const revisionOf = (file: string) => {
+    const stat = fs.statSync(file, { bigint: true })
+
+    return `${stat.mtimeNs}:${stat.size}`
+  }
+
   beforeEach(() => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'herald-pet-'))
     process.env.HERMES_HOME = home
@@ -44,7 +50,7 @@ describe('the pet Hermes shows', () => {
   it('shows the configured pet, named by its pet.json, with its spritesheet’s revision and type', () => {
     petConfig('enabled: true\nslug: boba\nscale: 0.5')
     const dir = addPet('boba', { 'pet.json': JSON.stringify({ id: 'boba', displayName: 'Boba', spritesheetPath: 'spritesheet.webp' }), 'spritesheet.webp': 'sheet bytes' })
-    addPet('alpha')
+    const alpha = addPet('alpha')
     const stat = fs.statSync(path.join(dir, 'spritesheet.webp'), { bigint: true })
 
     const info = readPetInfo(home)
@@ -57,8 +63,8 @@ describe('the pet Hermes shows', () => {
       revision: `${stat.mtimeNs}:${stat.size}`,
       mime: 'image/webp',
       installed: [
-        { slug: 'alpha', displayName: 'alpha' },
-        { slug: 'boba', displayName: 'Boba' }
+        { slug: 'alpha', displayName: 'alpha', revision: revisionOf(path.join(alpha, 'spritesheet.webp')), mime: 'image/webp' },
+        { slug: 'boba', displayName: 'Boba', revision: `${stat.mtimeNs}:${stat.size}`, mime: 'image/webp' }
       ]
     })
     expect(petShown(info)).toBe(true)
@@ -136,8 +142,8 @@ describe('the pet Hermes shows', () => {
     const info = readPetInfo(home)
 
     expect(info.installed).toEqual([
-      { slug: 'bom', displayName: 'Bom Bom' },
-      { slug: 'petdex', displayName: 'petdex' }
+      { slug: 'bom', displayName: 'Bom Bom', revision: revisionOf(path.join(home, 'pets', 'bom', 'spritesheet.png')), mime: 'image/png' },
+      { slug: 'petdex', displayName: 'petdex', revision: revisionOf(path.join(home, 'pets', 'petdex', 'sprite.webp')), mime: 'image/webp' }
     ])
     expect(info).toMatchObject({ slug: 'petdex', mime: 'image/webp' })
     expect(petSheetPath('petdex', home)).toBe(path.join(home, 'pets', 'petdex', 'sprite.webp'))
@@ -154,6 +160,28 @@ describe('the pet Hermes shows', () => {
 
     fs.rmSync(path.join(home, 'config.yaml'))
     expect(readPetInfo(home).enabled).toBe(false)
+  })
+
+  it('gives every installed pet its spritesheet’s revision and type, the way it gives the shown one', () => {
+    petConfig('enabled: true\nslug: boba')
+    const boba = addPet('boba', { 'spritesheet.png': 'png bytes' })
+    const mochi = addPet('mochi', { 'pet.json': JSON.stringify({ spritesheetPath: 'Mochi.PNG' }), 'Mochi.PNG': 'upper case png' })
+    const zed = addPet('zed', { 'sprite.webp': 'webp bytes' })
+
+    const info = readPetInfo(home)
+
+    expect(info.installed).toEqual([
+      { slug: 'boba', displayName: 'boba', revision: revisionOf(path.join(boba, 'spritesheet.png')), mime: 'image/png' },
+      { slug: 'mochi', displayName: 'mochi', revision: revisionOf(path.join(mochi, 'Mochi.PNG')), mime: 'image/png' },
+      { slug: 'zed', displayName: 'zed', revision: revisionOf(path.join(zed, 'sprite.webp')), mime: 'image/webp' }
+    ])
+    expect(info).toMatchObject({ slug: 'boba', revision: info.installed[0].revision, mime: 'image/png' })
+
+    const before = info.installed[2].revision
+    fs.writeFileSync(path.join(zed, 'sprite.webp'), 'a longer new sheet')
+
+    expect(readPetInfo(home).installed[2].revision).not.toBe(before)
+    expect(readPetInfo(home).revision).toBe(info.revision)
   })
 
   it('has no pet to show when the pets folder is missing', () => {

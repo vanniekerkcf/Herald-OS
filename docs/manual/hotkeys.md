@@ -12,6 +12,7 @@ work everywhere.
 | Command bar | `Cmd+K` | `Super+Shift+Space` or `Ctrl+K` |
 | All applications | `Cmd+Shift+A` | `Super+A` |
 | Talk to Hermes | `Alt+Space` | `Super+V` |
+| Go to the approval or question Hermes is waiting on | `Cmd+Option+A` | `Super+Shift+A` |
 | Dictate into any app (again, or a pause, to finish) | `Cmd+Ctrl+X` | `Super+Ctrl+X` |
 | Emoji, typed into any app | `Cmd+Ctrl+E` | `Super+Ctrl+E` |
 | Put the desktop pet away, or bring it back | `Cmd+Ctrl+H` | `Super+Ctrl+H` |
@@ -66,6 +67,23 @@ work everywhere.
 | Record the screen (again to stop) | `Super+Alt+Print` |
 | Pick a colour from the screen | `Super+Ctrl+Print` |
 | Ask Hermes about part of the screen | `Super+Shift+S` |
+
+## The Terminal
+
+In Herald's Terminal, `Ctrl+C` stops the running command, as in any terminal, so copy and paste
+add `Shift`. Right-click (or press `Shift+F10` or the keyboard's menu key) for Copy and Paste; Copy
+is there once some text is selected. A paste reaches the program as a paste, so an editor or a
+shell that tells pasted text from typing still does. Escape sequences and other control characters
+are taken out of what you paste, so text copied from a web page cannot end the paste early and run
+a command of its own. Text dragged onto the Terminal pastes the same way. The Terminal pastes or
+copies up to 1 MiB at a time.
+
+| Action | macOS | Herald OS Linux |
+| --- | --- | --- |
+| Copy the selected text | `Cmd+C` or `Ctrl+Shift+C` | `Ctrl+Shift+C` |
+| Paste | `Cmd+V` or `Ctrl+Shift+V` | `Ctrl+Shift+V` or `Shift+Insert` |
+| Copy and Paste menu | Right-click, `Shift+F10` | Right-click, `Shift+F10` |
+| Stop the running command | `Ctrl+C` | `Ctrl+C` |
 
 ## Herald Canvas
 

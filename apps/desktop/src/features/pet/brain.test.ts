@@ -30,7 +30,7 @@ function clarify(id: string): PendingRequest & { respond: ReturnType<typeof vi.f
 }
 
 function agentEvent(command: string, args: Record<string, unknown>, extra: Partial<CommandEvent> = {}): CommandEvent {
-  return { id: 1, command, args, source: 'agent', result: { ok: true, summary: 'done' }, ts: 1000, ...extra }
+  return { id: 1, command, args, source: 'agent', result: { ok: true, summary: 'done' }, ts: 1000, session: null, ...extra }
 }
 
 describe('the pet answers approvals', () => {

@@ -24,6 +24,21 @@ export function nodeSocketAddress(address: string | undefined): string | undefin
   return abstract ? `unix:socket=\u0000${abstract}` : raw
 }
 
+/**
+ * Call `listener` once `bus` is gone. dbus-next passes a connection's errors on to the bus, but not a
+ * clean close: the connection emits 'end' when the bus daemon ends the stream, and its socket 'close'.
+ * `_connection` is private to dbus-next (lib/bus.js in 0.10.2, the version package-lock.json pins);
+ * notification-daemon.test.ts checks it against a real dbus-next bus, so an upgrade that moves it
+ * fails there rather than leaving a closed bus unnoticed.
+ */
+export function onBusClosed(bus: dbus.MessageBus, listener: (reason: string) => void): void {
+  const connection = (bus as unknown as { _connection?: NodeJS.EventEmitter & { stream?: NodeJS.EventEmitter } })._connection
+
+  bus.on('error', error => listener(error instanceof Error ? error.message : String(error)))
+  connection?.on('end', () => listener('the session bus closed the connection'))
+  connection?.stream?.on('close', () => listener('the connection to the session bus closed'))
+}
+
 const BUS_NAME = 'org.freedesktop.Notifications'
 const OBJECT_PATH = '/org/freedesktop/Notifications'
 const CONNECT_TIMEOUT_MS = 5000
@@ -176,7 +191,14 @@ export class NotificationDaemon {
     this.bus = bus
     // A connection failure surfaces here rather than through the pending name request.
     const firstError = new Promise<never>((_resolve, reject) => bus.once('error', reject))
-    bus.on('error', error => log('notifications', `bus error: ${error instanceof Error ? error.message : String(error)}`))
+    // A dropped or closed connection no longer owns the name: stop claiming to serve it.
+    onBusClosed(bus, reason => {
+      if (this.bus === bus) {
+        log('notifications', `bus gone: ${reason}`)
+      }
+
+      this.dropBus(bus)
+    })
 
     const iface = new NotificationsInterface({
       notify: (...args) => this.notify(...args),
@@ -193,20 +215,29 @@ export class NotificationDaemon {
 
       if (reply !== dbus.RequestNameReply.PRIMARY_OWNER && reply !== dbus.RequestNameReply.ALREADY_OWNER) {
         log('notifications', `${BUS_NAME} is owned by another notification daemon (reply ${reply}); not serving`)
-        this.teardown()
+        this.dropBus(bus)
 
         return
       }
     } catch (error) {
       log('notifications', `could not claim ${BUS_NAME}: ${(error as Error).message}`)
-      this.teardown()
+      this.dropBus(bus)
 
+      return
+    }
+
+    if (this.bus !== bus) {
       return
     }
 
     this.iface = iface
     this.registerActionHandler()
     log('notifications', `serving ${BUS_NAME} at ${OBJECT_PATH}`)
+  }
+
+  /** Whether this process owns the bus name, so a notification sent to the session bus would come back here. */
+  serving(): boolean {
+    return this.iface !== null
   }
 
   stop(): void {
@@ -222,6 +253,13 @@ export class NotificationDaemon {
     this.expiry.clear()
     this.active.clear()
     this.teardown()
+  }
+
+  /** Tear down `bus` only while it is still this daemon's, never one a later start opened. */
+  private dropBus(bus: dbus.MessageBus): void {
+    if (this.bus === bus) {
+      this.teardown()
+    }
   }
 
   private teardown(): void {

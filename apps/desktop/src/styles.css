@@ -191,8 +191,9 @@ body,
   background: transparent;
 }
 
-/* The pet's own window is only as big as the pet and what it holds: a short shadow fits inside it. */
-:root[data-shell-mode='panels'][data-surface='pet'] {
+/* The pet's own window, and the Dock menu's, are only as big as what they hold: a short shadow fits inside them. */
+:root[data-shell-mode='panels'][data-surface='pet'],
+.dock-menu {
   --shadow-float: 0 2px 6px rgba(0, 8, 40, 0.35), 0 6px 12px rgba(0, 6, 40, 0.4);
 }
 
@@ -303,6 +304,25 @@ textarea {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
     0 0 0 3px rgba(47, 125, 255, 0.22);
+}
+
+/* A field that is a glass-input, or a text field inside a glass-input wrapper, is marked by the
+   :focus-within border and halo, so it hides the global outline, which no outline-none utility can
+   override because it is unlayered. The outline turns transparent rather than off so forced-colors
+   mode, which drops box-shadow, still draws it. Buttons and toggles keep the outline that marks
+   keyboard focus on every other button, and inside a wrapper the ring would not show which of them
+   has focus. */
+.glass-input:is(
+    input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='file'], [type='button'], [type='submit'], [type='reset'], [type='image']),
+    textarea,
+    select
+  ):focus-visible,
+.glass-input
+  :is(
+    input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='file'], [type='button'], [type='submit'], [type='reset'], [type='image']),
+    textarea
+  ):focus-visible {
+  outline: 2px solid transparent;
 }
 
 .hairline {
@@ -637,7 +657,8 @@ textarea {
     opacity 120ms var(--ease-out),
     transform 120ms var(--ease-out);
 }
-.dock-item:hover .dock-label {
+.dock-item:hover .dock-label,
+.dock-item:focus-visible .dock-label {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
@@ -709,6 +730,30 @@ textarea {
 }
 .side-handle.is-dragging::after {
   opacity: 0.9;
+}
+
+/*
+ * Controls that appear when their row is hovered. Mark the row `group/reveal-row`: a plain `group`
+ * doesn't count, so a `group` added inside a row later can't reveal another row's controls. Rows
+ * shouldn't nest. The controls always show on screens with any touch input, since a finger can't
+ * hover even when a mouse or trackpad is the main pointer. Keyboard users see them while the row
+ * or the control has keyboard focus, and they stay up while a menu they opened is expanded. Use
+ * this instead of `opacity-0 group-hover:opacity-100` or `hidden group-hover:flex`.
+ */
+@utility reveal {
+  opacity: 0;
+
+  &:is(:where(.group\/reveal-row):is(:hover, :focus-visible, :has(:focus-visible)) *),
+  &:focus-visible,
+  &:has(:focus-visible),
+  &[aria-expanded='true'],
+  &:has([aria-expanded='true']) {
+    opacity: 1;
+  }
+
+  @media (hover: none), (pointer: coarse), (any-pointer: coarse) {
+    opacity: 1;
+  }
 }
 
 .shimmer {

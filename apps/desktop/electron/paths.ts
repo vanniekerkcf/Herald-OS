@@ -22,10 +22,24 @@ export function heraldOsDataDir(): string {
   return path.join(hermesHome(), 'herald-os')
 }
 
-export const isDev = process.env.HERALD_OS_BUILD_MODE === 'development' || Boolean(osEnv('DEV_SERVER'))
+let packaged: boolean | undefined
 
-export function devServerUrl(): string | undefined {
-  return osEnv('DEV_SERVER')
+/**
+ * Main passes `app.isPackaged` as it starts, before any window opens; this module stays free of
+ * Electron so the rest of main and its tests can load it alone. Until then nothing is trusted to
+ * be a checkout.
+ */
+export function setPackaged(value: boolean): void {
+  packaged = value
+}
+
+export function isDev(): boolean {
+  return process.env.HERALD_OS_BUILD_MODE === 'development' || Boolean(devServerUrl())
+}
+
+/** The dev server to load the shell from. An installed build never does, whatever its environment says. */
+export function devServerUrl(env: NodeJS.ProcessEnv = process.env, installed = packaged ?? true): string | undefined {
+  return installed ? undefined : osEnv('DEV_SERVER', env)
 }
 
 /** The built renderer page. Every electron/ module is bundled into dist/electron/main.mjs. */
@@ -46,7 +60,8 @@ export function isShellPage(url: string, index = rendererIndex(), dev: string | 
       return target.origin === new URL(dev).origin
     }
 
-    return target.protocol === 'file:' && target.pathname === pathToFileURL(index).pathname
+    // A file URL with a host (file://server/...) names a file on another machine, whatever its path.
+    return target.protocol === 'file:' && target.host === '' && target.pathname === pathToFileURL(index).pathname
   } catch {
     return false
   }

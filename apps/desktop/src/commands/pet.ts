@@ -229,7 +229,7 @@ export const petCommands: readonly OsCommand[] = [
         return ok('No pet is installed yet: Settings, Pet has the petdex gallery', { items: [] })
       }
 
-      return ok(`Installed pets: ${info.installed.map(pet => pet.displayName).join(', ')}`, { items: info.installed.map(pet => ({ ...pet, active: pet.slug === info.slug })) })
+      return ok(`Installed pets: ${info.installed.map(pet => pet.displayName).join(', ')}`, { items: info.installed.map(pet => ({ slug: pet.slug, displayName: pet.displayName, active: pet.slug === info.slug })) })
     }
   },
   {

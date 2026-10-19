@@ -1,32 +1,54 @@
+import { useStore } from '@nanostores/react'
 import { IconMessage, IconRefresh } from '@tabler/icons-react'
 import { useEffect, useState } from 'react'
 import type { ProcessInfo } from '../../../shared/ipc.ts'
 import { Button } from '../../components/ui/button.tsx'
 import { Meter, Stat } from '../../components/ui/primitives.tsx'
-import { SurfaceFrame } from '../../components/ui/surface-frame.tsx'
+import { ErrorNote, SurfaceFrame } from '../../components/ui/surface-frame.tsx'
 import { cn } from '../../lib/cn.ts'
 import { formatBytes, formatDuration, formatPercent } from '../../lib/format.ts'
+import { logFailure } from '../../lib/report.ts'
 import { rest } from '../../lib/rest.ts'
 import { useBackendData } from '../../lib/use-async.ts'
 import { sendPrompt } from '../../store/chat.ts'
 import { showSurface } from '../../store/surface.ts'
-import { useSystemInfo, useSystemStats } from '../../store/system.ts'
+import { $systemInfoFailed, loadSystemInfo, useSystemInfo, useSystemStats } from '../../store/system.ts'
 
 export function SystemSurface() {
   const stats = useSystemStats()
   const info = useSystemInfo()
+  const infoFailed = useStore($systemInfoFailed)
   const [sort, setSort] = useState<'cpu' | 'memory'>('cpu')
   const [processes, setProcesses] = useState<ProcessInfo[]>([])
+  const [processesFailed, setProcessesFailed] = useState(false)
+  const [refreshes, setRefreshes] = useState(0)
   const hermes = useBackendData(() => rest.get<Record<string, unknown>>('/api/status'))
+  const refresh = () => setRefreshes(count => count + 1)
 
   useEffect(() => {
     let cancelled = false
+    // Polled every few seconds: a failure is logged as it starts, not each time it repeats.
+    let failing = false
     const load = () =>
-      window.heraldOS.system.processes(sort, 30).then(rows => {
-        if (!cancelled) {
-          setProcesses(rows)
+      window.heraldOS.system.processes(sort, 30).then(
+        rows => {
+          if (!cancelled) {
+            failing = false
+            setProcesses(rows)
+            setProcessesFailed(false)
+          }
+        },
+        (error: unknown) => {
+          if (!cancelled) {
+            if (!failing) {
+              logFailure('system.processes')(error)
+            }
+
+            failing = true
+            setProcessesFailed(true)
+          }
         }
-      })
+      )
     void load()
     const timer = setInterval(() => void load(), 4000)
 
@@ -34,7 +56,7 @@ export function SystemSurface() {
       cancelled = true
       clearInterval(timer)
     }
-  }, [sort])
+  }, [sort, refreshes])
 
   const memPercent = stats ? (stats.memoryUsed / stats.memoryTotal) * 100 : 0
   const askHermes = (text: string) => {
@@ -52,6 +74,11 @@ export function SystemSurface() {
         </Button>
       }
     >
+      {infoFailed && !info && (
+        <div className="mb-6">
+          <ErrorNote message="Could not read this computer's details." onRetry={() => void loadSystemInfo()} />
+        </div>
+      )}
       <div className="grid grid-cols-4 gap-8">
         <div className="flex flex-col gap-2">
           <Stat label="CPU" value={stats ? formatPercent(stats.cpuPercent) : '—'} sub={stats ? `load ${stats.loadAverage.map(v => v.toFixed(1)).join(' / ')}` : undefined} />
@@ -91,11 +118,16 @@ export function SystemSurface() {
               </button>
             ))}
           </div>
-          <Button variant="ghost" size="icon-sm" aria-label="Refresh" onClick={() => void window.heraldOS.system.processes(sort, 30).then(setProcesses)}>
+          <Button variant="ghost" size="icon-sm" aria-label="Refresh" onClick={refresh}>
             <IconRefresh size={15} />
           </Button>
         </div>
       </div>
+      {processesFailed && (
+        <div className="mt-2">
+          <ErrorNote message="Could not list the running processes." onRetry={refresh} />
+        </div>
+      )}
       <table className="mt-2 w-full text-[12.5px]">
         <thead className="text-left text-[11px] text-fg-3">
           <tr>
@@ -109,7 +141,7 @@ export function SystemSurface() {
         </thead>
         <tbody>
           {processes.map(proc => (
-            <tr key={proc.pid} className="group border-t border-hairline">
+            <tr key={proc.pid} className="group/reveal-row border-t border-hairline">
               <td className="max-w-0 truncate py-1.5 pr-3 font-mono text-fg-2" title={proc.command}>
                 {proc.name}
               </td>
@@ -118,7 +150,7 @@ export function SystemSurface() {
               <td className="py-1.5 pr-3 text-right tabular-nums text-fg-2">{formatBytes(proc.rssBytes, 0)}</td>
               <td className="truncate py-1.5 text-fg-3">{proc.user}</td>
               <td className="py-1.5 text-right">
-                <button type="button" onClick={() => askHermes(`Tell me about the process "${proc.name}" (pid ${proc.pid}) that is using ${proc.cpuPercent.toFixed(0)}% CPU. Should I stop it? If I confirm, stop it.`)} className="text-[11.5px] text-fg-4 opacity-0 group-hover:opacity-100 hover:text-accent">
+                <button type="button" onClick={() => askHermes(`Tell me about the process "${proc.name}" (pid ${proc.pid}) that is using ${proc.cpuPercent.toFixed(0)}% CPU. Should I stop it? If I confirm, stop it.`)} className="reveal text-[11.5px] text-fg-4 hover:text-accent">
                   Ask Hermes
                 </button>
               </td>

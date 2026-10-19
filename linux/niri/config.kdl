@@ -134,7 +134,7 @@ window-rule {
     clip-to-geometry false
 }
 
-// Dock: bottom centre, no frame; the shell slides it in and out.
+// Dock: bottom centre, no frame; the bottom strut keeps tiles clear of it, so it does not hide.
 window-rule {
     match app-id=r#"^(herald-os|Herald OS)$"# title="^Herald OS · Dock$"
     open-floating true
@@ -238,6 +238,21 @@ window-rule {
     geometry-corner-radius 0
     clip-to-geometry false
 }
+// The Dock's menu for a running app, a window of its own because the Dock's is too short for it. It
+// opens just above the Dock's middle icon and the shell moves it over the icon clicked before drawing
+// it. Never focused on open: the keys stay with the Dock, and the pointer is not pulled to the menu.
+// After the rule for the Hermes window and its floating apps, which would round and clip it.
+window-rule {
+    match app-id=r#"^(herald-os|Herald OS)$"# title="^Herald OS · Dock Menu$"
+    open-floating true
+    open-focused false
+    default-floating-position x=0 y=68 relative-to="bottom"
+    border { off; }
+    focus-ring { off; }
+    shadow { off; }
+    geometry-corner-radius 0
+    clip-to-geometry false
+}
 // The Hermes window shares the screen with one app by default (its pages adapt to a half column).
 window-rule {
     match app-id=r#"^(herald-os|Herald OS)$"# title="^Herald OS$"
@@ -265,6 +280,20 @@ window-rule {
 window-rule {
     match app-id=r#"^(herald-os|Herald OS)$"# title="^Herald OS · (Docs|Sheets|Slides)$"
     default-column-width { proportion 0.75; }
+}
+// The Pet Room is watched beside the work, not worked in: a third of the screen, the narrowest
+// preset (Mod+R widens it), leaves the rest to the app Hermes is working in.
+window-rule {
+    match app-id=r#"^(herald-os|Herald OS)$"# title="^Herald OS · Pet Room$"
+    default-column-width { proportion 0.33333; }
+}
+// Herald Calc is kept at hand over the work rather than given a column: it floats, at the size the
+// shell opens it with.
+window-rule {
+    match app-id=r#"^(herald-os|Herald OS)$"# title="^Herald OS · Calc$"
+    open-floating true
+    default-column-width { fixed 780; }
+    default-window-height { fixed 560; }
 }
 // The shell's file and print dialogs float over the app. niri floats a dialog whose parent it
 // knows, but the first one each window opens maps before GTK has named its parent. GTK names
@@ -303,6 +332,7 @@ binds {
     // Nested niri (a VM without GPU acceleration) uses Alt as Mod, where Mod+Alt+Space is just Mod+Space.
     Mod+M hotkey-overlay-title="Herald OS menu" repeat=false { spawn "herald-os" "menu"; }
     Mod+V hotkey-overlay-title="Talk to Hermes" repeat=false { spawn "herald-os" "voice"; }
+    Mod+Shift+A hotkey-overlay-title="Go to the waiting approval or question" repeat=false { spawn "herald-os" "os" "requests.focus"; }
     Mod+K hotkey-overlay-title="Show these hotkeys" { show-hotkey-overlay; }
 
     Mod+Return hotkey-overlay-title="Terminal" { spawn "herald-os" "open" "terminal"; }

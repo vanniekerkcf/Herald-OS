@@ -34,6 +34,12 @@ def session_source() -> str:
     return _session_env("HERMES_SESSION_SOURCE").strip().lower()
 
 
+def ui_session() -> str:
+    """The live Hermes UI session the turn's tools run in (the tui_gateway's ``sid``, bound as
+    ``HERMES_UI_SESSION_ID``), or "" when Hermes binds none."""
+    return _session_env("HERMES_UI_SESSION_ID").strip()
+
+
 def _hermes_binds_sessions() -> bool:
     """Whether Hermes binds sessions in this process, as the gateway Herald OS talks to, a messaging
     gateway and cron do for every turn. The ``hermes`` CLI never does: its HERMES_SESSION_* come from

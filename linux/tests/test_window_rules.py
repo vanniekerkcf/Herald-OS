@@ -77,7 +77,7 @@ def test_the_shell_s_dialogs_float_in_a_checkout_and_packaged():
 
 
 def test_the_shell_s_own_windows_are_not_taken_for_dialogs():
-    for title in ("Herald OS", "Herald OS · Docs", "Herald OS · Sheets", "Herald OS · Slides", "Herald OS · Canvas", "Herald OS · Studio", "Preview", "YouTube"):
+    for title in ("Herald OS", "Herald OS · Docs", "Herald OS · Sheets", "Herald OS · Slides", "Herald OS · Canvas", "Herald OS · Studio", "Herald OS · Pet Room", "Preview", "YouTube"):
         assert FLOATS not in props("herald-os", title), title
 
 
@@ -89,6 +89,32 @@ def test_office_windows_tile_at_three_quarters_of_the_screen():
         rules = props("herald-os", title)
         assert "default-column-width { proportion 0.75; }" in rules, title
         assert FLOATS not in rules, title
+
+
+def test_the_pet_room_tiles_at_a_third_of_the_screen_beside_the_work_and_is_never_taken_for_the_pet():
+    title = re.search(r"room: \{ title: '([^']+)'", (DESKTOP / "electron" / "shell" / "mode.ts").read_text()).group(1)
+    for app_id in ("herald-os", "Herald OS"):
+        rules = props(app_id, title)
+        assert _last(rules, "default-column-width") == "default-column-width { proportion 0.33333; }"
+        assert FLOATS not in rules
+        assert "border { off; }" not in rules
+
+
+def test_herald_calc_floats_over_the_work_at_the_size_the_shell_opens_it_with():
+    calc = re.search(r"calc: \{ title: '([^']+)', width: (\d+), height: (\d+) \}", (DESKTOP / "electron" / "shell" / "mode.ts").read_text())
+    title, width, height = calc.groups()
+    assert (width, height) == ("780", "560")
+    for app_id in ("herald-os", "Herald OS"):
+        rules = props(app_id, title)
+        assert FLOATS in rules
+        assert _last(rules, "default-column-width") == f"default-column-width {{ fixed {width}; }}"
+        assert _last(rules, "default-window-height") == f"default-window-height {{ fixed {height}; }}"
+        # A rounded glass tile like the shell's other apps, not a frameless surface.
+        assert _last(rules, "geometry-corner-radius") == "geometry-corner-radius 14"
+        assert "border { off; }" not in rules
+    # The rule is Calc's alone: the Hermes window and the other apps still tile.
+    for other in ("Herald OS", "Herald OS · Sheets", "Herald OS · Pet Room"):
+        assert FLOATS not in props("herald-os", other), other
 
 
 def test_the_audience_window_opens_full_screen_and_leaves_the_keys_to_the_presenter_view():
@@ -118,6 +144,26 @@ def test_the_pet_floats_above_the_dock_never_takes_the_keys_as_it_opens_and_has_
         # Rounded or clipped like the shell's tiles, the sprite would lose its corners.
         assert _last(rules, "geometry-corner-radius") == "geometry-corner-radius 0"
         assert _last(rules, "clip-to-geometry") == "clip-to-geometry false"
+
+
+def test_the_dock_menu_floats_above_the_dock_leaves_the_keys_to_it_and_has_no_frame():
+    mode = (DESKTOP / "electron" / "shell" / "mode.ts").read_text()
+    title = re.search(r"DOCK_MENU_TITLE = '([^']+)'", mode).group(1)
+    dock = re.search(r"dock: '([^']+)'", mode).group(1)
+    for app_id in ("herald-os", "Herald OS"):
+        rules = props(app_id, title)
+        assert FLOATS in rules
+        # Opened with the keys, it would pull the pointer to it (warp-mouse-to-focus).
+        assert _last(rules, "open-focused") == "open-focused false"
+        # The shell's geometry puts the menu over the Dock's middle icon exactly there.
+        assert _last(rules, "default-floating-position") == 'default-floating-position x=0 y=68 relative-to="bottom"'
+        assert _last(rules, "border") == "border { off; }"
+        assert _last(rules, "focus-ring") == "focus-ring { off; }"
+        assert _last(rules, "shadow") == "shadow { off; }"
+        assert _last(rules, "geometry-corner-radius") == "geometry-corner-radius 0"
+        assert _last(rules, "clip-to-geometry") == "clip-to-geometry false"
+        # And the Dock keeps its own place.
+        assert _last(props(app_id, dock), "default-floating-position") == 'default-floating-position x=0 y=0 relative-to="bottom"'
 
 
 def test_super_ctrl_h_hides_or_shows_the_pet():

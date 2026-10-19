@@ -17,7 +17,8 @@ electron/              Electron main: owns the machine
   shell/               shell modes, panels-mode windows, control socket, notification daemon
   wm/                  niri compositor IPC (Linux panels mode)
 preload/index.ts       the `window.heraldOS` bridge, the renderer's only way to reach main
-shared/                types shared by main, preload and renderer (IPC contract, voice settings)
+shared/                types shared by main, preload and renderer (IPC contract, voice settings),
+                       and the translations (i18n.ts, locales/)
 src/                   React renderer
   main.tsx             entry
   shell/               the desktop: ShellRoot, app registry, menu bar, dock, command bar, boot screen
@@ -30,7 +31,7 @@ src/                   React renderer
   components/          shared UI primitives and the two brand marks
 public/                served as-is: favicon, audio-capture worklet
 build/                 app icons and macOS entitlements for electron-builder
-scripts/               bundle-electron.mjs (esbuild for main and preload)
+scripts/               bundle-electron.mjs (esbuild for main and preload), after-pack.mjs (electron-builder hook), check-mac-signing-config.mjs (release check)
 ```
 
 ## Scripts
@@ -43,8 +44,9 @@ Run them here, or from the repository root (`npm run dev`, `npm run build`, `npm
 | `npm run build` | Renderer into `dist/renderer`, main and preload into `dist/electron` |
 | `npm start` | Build, then run the built app |
 | `npm run typecheck` | `tsc` for the renderer and for main and preload |
-| `npm test` | Vitest over `src`, `electron` and `shared` |
-| `npm run dist:mac` | Apple Silicon DMG and zip in `release/` (unsigned) |
+| `npm test` | Vitest over `src`, `electron`, `shared` and `scripts` |
+| `npm run dist:mac` | Apple Silicon (`-mac-arm64`) and Intel (`-mac-x64`) DMGs and zips in `release/` (unsigned); `node scripts/check-mac-builds.mjs` checks every Mach-O in each app against its architecture |
+| `npm run pack:mac` | The packaging half of `dist:mac`, on an existing `npm run build`; the release workflow signs here ([MACOS-SIGNING.md](../../docs/MACOS-SIGNING.md)) |
 | `npm run dist:linux` | `herald-os-<version>-linux-<arch>.tar.gz` in `release/` for this machine's architecture (`-- --x64` or `-- --arm64` to pick), with the Linux CLIs, session, themes, catalog and bridge plugin in `resources/` |
 
 ## Common changes
@@ -53,6 +55,8 @@ Run them here, or from the repository root (`npm run dev`, `npm run build`, `npm
   `src/features/<name>/`, mount pages in `src/shell/MainWindow.tsx`.
 - **An action users or Hermes can trigger.** Register an `OsCommand` in `src/commands/<area>.ts`.
   The command bar, the voice fast path and the agent's `os_ui` tool all pick it up.
+- **Text people read.** Add it to `shared/locales/en.ts` and show it with `t` from `useT()`
+  (`src/store/i18n.ts`); [docs/TRANSLATING.md](../../docs/TRANSLATING.md) has the details.
 - **A native capability.** Add it to `HostPlatform` (`electron/platform/types.ts`), implement it in
   each platform file, handle it in `electron/ipc/`, expose it in `preload/index.ts` and type it in
   `shared/ipc.ts`.

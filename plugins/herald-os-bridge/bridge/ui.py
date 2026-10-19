@@ -5,9 +5,13 @@ hands the backend its path and a per-launch token through ``HERALD_OS_CONTROL_SO
 ``HERALD_OS_CONTROL_TOKEN``. Every request carries the token; replies are single JSON objects.
 
 Requests:
-    {"cmd": "ui", "command": "<id>", "args": {...}, "source": "agent"}  -> CommandResult
-    {"cmd": "ui-list"}                                                  -> {"ok": true, "result": [CommandSummary]}
-    {"cmd": "ui-state"}                                                 -> {"ok": true, "result": {page, windows, ...}}
+    {"cmd": "ui", "command": "<id>", "args": {...}, "source": "agent", "session": "<sid>"}  -> CommandResult
+    {"cmd": "ui-list"}                                                                     -> {"ok": true, "result": [CommandSummary]}
+    {"cmd": "ui-state"}                                                                    -> {"ok": true, "result": {page, windows, ...}}
+
+``session`` is the live Hermes UI session whose tool sent the command (``HERMES_UI_SESSION_ID``, which
+Hermes binds for tools), so the shell can tell which conversation's agent ran it. It is left out when
+Hermes binds none; a shell from before it ignores the field, and a request without it still runs.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import os
 import socket
 from typing import Any
 
+from .scope import ui_session
 from .util import os_env
 
 DEFAULT_TIMEOUT = 12.0
@@ -81,7 +86,11 @@ def request(payload: dict[str, Any], *, timeout: float = DEFAULT_TIMEOUT) -> dic
 
 
 def run_command(command: str, args: dict[str, Any] | None = None, *, source: str = "agent", timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    return request({"cmd": "ui", "command": command, "args": args or {}, "source": source}, timeout=timeout)
+    payload: dict[str, Any] = {"cmd": "ui", "command": command, "args": args or {}, "source": source}
+    session = ui_session()
+    if session:
+        payload["session"] = session
+    return request(payload, timeout=timeout)
 
 
 def list_commands() -> list[dict[str, Any]]:

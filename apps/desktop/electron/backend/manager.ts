@@ -9,6 +9,7 @@ import { log } from '../log.ts'
 import { hermesHome, heraldOsDataDir } from '../paths.ts'
 import { ensureBridgePlugin } from './bridge-plugin.ts'
 import { type AttachTarget, attachTarget, foreignGateway } from './coexist.ts'
+import { backendReadsLocalFiles } from './local-files.ts'
 import { waitForStatus } from './probe.ts'
 import { LineBuffer, parseReadyLine, readyFileName, staleReadyFiles } from './ready.ts'
 import { pendingInstall, resolveBackendRuntime } from './resolve.ts'
@@ -36,6 +37,53 @@ export function waitingReason(install: string | null): string {
       return 'Hermes Agent did not install, so it tries again in a few minutes (journalctl -u herald-os-hermes says why). Herald OS starts it when it is ready.'
     default:
       return 'Hermes Agent is not installed yet. It installs by itself once this computer is online; Herald OS starts it then.'
+  }
+}
+
+/** The first readable reason in a JSON error: a string, `detail`/`error`/`message`/`msg`, or FastAPI's list of them. */
+function reasonIn(value: unknown, depth = 0): string | undefined {
+  if (typeof value === 'string') {
+    return value.trim() || undefined
+  }
+
+  if (depth > 3 || typeof value !== 'object' || value === null) {
+    return undefined
+  }
+
+  if (Array.isArray(value)) {
+    const reasons = value.map(item => reasonIn(item, depth + 1)).filter(Boolean)
+
+    return reasons.length ? reasons.join('; ') : undefined
+  }
+
+  const record = value as Record<string, unknown>
+
+  for (const key of ['detail', 'error', 'message', 'msg']) {
+    const reason = reasonIn(record[key], depth + 1)
+
+    if (reason) {
+      return reason
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * The reason in a failed REST answer's body. An HTML page (a proxy's 502, a server's 500 page)
+ * carries none, so it gives "" and the caller words the failure from the status code.
+ */
+export function restErrorDetail(text: string, statusText: string): string {
+  const body = text.trim()
+
+  if (body.startsWith('<')) {
+    return ''
+  }
+
+  try {
+    return reasonIn(JSON.parse(body)) ?? statusText
+  } catch {
+    return body || statusText
   }
 }
 
@@ -149,16 +197,9 @@ export class BackendManager {
     const text = await response.text()
 
     if (!response.ok) {
-      let detail = response.statusText
+      const detail = restErrorDetail(text, response.statusText)
 
-      try {
-        const parsed = JSON.parse(text) as { detail?: unknown; error?: unknown }
-        detail = String(parsed.detail ?? parsed.error ?? detail)
-      } catch {
-        detail = text || detail
-      }
-
-      throw new Error(`${request.method} ${request.path} -> ${response.status}: ${detail}`)
+      throw new Error(`${request.method} ${request.path} -> ${response.status}${detail ? `: ${detail}` : ''}`)
     }
 
     return (text ? JSON.parse(text) : null) as T
@@ -167,7 +208,7 @@ export class BackendManager {
   private async launch(attempt: number): Promise<void> {
     const generation = ++this.startGeneration
     this.clearWaitTimer()
-    this.update({ phase: attempt === 0 ? 'resolving' : 'restarting', attempt, error: undefined, install: undefined })
+    this.update({ phase: attempt === 0 ? 'resolving' : 'restarting', attempt, error: undefined, install: undefined, localFiles: undefined })
 
     let attach: AttachTarget | null
 
@@ -212,7 +253,7 @@ export class BackendManager {
       }
 
       const wsUrl = `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(this.token)}`
-      this.update({ phase: 'ready', port, baseUrl, wsUrl, error: undefined, sharedGateway: this.sharedGateway()?.pid, bridgeError })
+      this.update({ phase: 'ready', port, baseUrl, wsUrl, error: undefined, sharedGateway: this.sharedGateway()?.pid, bridgeError, localFiles: true })
       log('backend', `ready on ${baseUrl} via ${runtime.label}`)
     } catch (error) {
       if (generation !== this.startGeneration) {
@@ -271,10 +312,19 @@ export class BackendManager {
         fs.chmodSync(file, 0o600)
       }
 
+      const reads = await backendReadsLocalFiles(target.baseUrl, this.token, heraldOsDataDir())
+
+      if (generation !== this.startGeneration) {
+        return
+      }
+
+      // Until it shows that it reads this computer's files, an attached Hermes may run anywhere: a tunnel's end is a loopback address too.
+      const localFiles = reads === true
       const url = new URL(target.baseUrl)
       const port = Number(url.port) || 80
-      this.update({ phase: 'ready', port, baseUrl: target.baseUrl, wsUrl: `ws://${url.host}/api/ws?token=${encodeURIComponent(this.token)}`, error: undefined, sharedGateway: undefined, bridgeError: undefined })
-      log('backend', `attached to ${target.baseUrl}`)
+      this.update({ phase: 'ready', port, baseUrl: target.baseUrl, wsUrl: `ws://${url.host}/api/ws?token=${encodeURIComponent(this.token)}`, error: undefined, sharedGateway: undefined, bridgeError: undefined, localFiles })
+      const files = reads === true ? '' : `; ${reads === false ? "it does not read this computer's files" : "it could not be asked whether it reads this computer's files (an older Hermes?)"}, so attachments are uploaded to it`
+      log('backend', `attached to ${target.baseUrl}${files}`)
     } catch (error) {
       if (generation === this.startGeneration) {
         this.scheduleRestart(attempt, `could not reach ${target.baseUrl}: ${error instanceof Error ? error.message : String(error)}`)

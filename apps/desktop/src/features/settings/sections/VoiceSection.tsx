@@ -3,16 +3,24 @@ import { IconBellRinging, IconBolt, IconClockPause, IconCoin, IconEar, IconEye, 
 import { useEffect, useState } from 'react'
 import type { MicPermission, VoiceEngine, VoicePrefs } from '../../../../shared/ipc.ts'
 import { GlassButton, Pill, Toggle } from '../../../components/ui/glass.tsx'
-import { deviceNoun } from '../../../lib/platform-labels.ts'
+import { Meter } from '../../../components/ui/primitives.tsx'
+import { describeDeviceChoice } from '../../../lib/audio-devices.ts'
+import { audioScope, deviceNoun } from '../../../lib/platform-labels.ts'
+import { canOpenPrivacyPanes, openPrivacyPane } from '../../../lib/privacy-pane.ts'
+import { logFailure } from '../../../lib/report.ts'
 import { rest } from '../../../lib/rest.ts'
 import { useBackendData } from '../../../lib/use-async.ts'
+import { $inputDevices } from '../../../lib/voice/audio-capture.ts'
+import { helloReport, type SpeechOutcome } from '../../../lib/voice/speak-fallback.ts'
 import { LOCAL_STT_MODELS } from '../../../lib/voice/stt-tuning.ts'
+import { $inputChoice, $micLevelPercent, chooseInputDevice, watchAudioDevices } from '../../../store/audio-devices.ts'
 import { $prefs, updatePrefs } from '../../../store/backend.ts'
+import { useT } from '../../../store/i18n.ts'
 import { notify } from '../../../store/notifications.ts'
 import { $voice, $voiceActive, LIVE_RATE_PER_MINUTE, liveSecondsToday, speakWithFreeFallback, startVoice } from '../../../store/voice.ts'
 import { fetchLiveStatus, type LiveStatus } from '../../../store/voice-live-status.ts'
 import { $wake, setWakeWordEnabled } from '../../../store/wake.ts'
-import { errorText, focusSettings, InlineNote, markSaved, MenuDropdown, RadioCard, SectionTitle, SettingsGroup, SettingsRow, Stepper } from './shared.tsx'
+import { errorText, focusSettings, InlineNote, markSaved, MenuDropdown, type MenuItem, RadioCard, SectionTitle, SettingsGroup, SettingsRow, Stepper } from './shared.tsx'
 
 /*
  * Voice: the two engines (free chained pipeline, paid GPT-Live), how a conversation starts (wake
@@ -48,6 +56,9 @@ const TTS_PROVIDERS = [
 const IDLE_OPTIONS = [20, 30, 45, 60, 120, 300]
 const CAP_OPTIONS = [0, 15, 30, 60, 120, 240]
 
+/** The picker entry that means "follow the system"; prefixed so it can never be a device id. */
+const AUTOMATIC_DEVICE = '__automatic__'
+
 export function VoiceSection() {
   const prefs = useStore($prefs)
   const voice = prefs.voice
@@ -59,10 +70,13 @@ export function VoiceSection() {
   const [mic, setMic] = useState<MicPermission>('unknown')
   const [hotkeyDraft, setHotkeyDraft] = useState(voice.hotkey)
   const [testing, setTesting] = useState(false)
+  // How the last Say hello went; `unplayable` when its sound was made but could not be played.
+  const [tested, setTested] = useState<SpeechOutcome | 'unplayable' | null>(null)
+  const t = useT()
 
   useEffect(() => {
     void fetchLiveStatus().then(setLiveStatus)
-    void window.heraldOS.voice.microphoneStatus().then(setMic)
+    void window.heraldOS.voice.microphoneStatus().then(setMic).catch(logFailure('voice.microphoneStatus'))
   }, [])
 
   useEffect(() => setHotkeyDraft(voice.hotkey), [voice.hotkey])
@@ -106,17 +120,21 @@ export function VoiceSection() {
 
   const sayHello = async () => {
     setTesting(true)
+    setTested(null)
 
     try {
-      await speakWithFreeFallback('Hello. This is Hermes, speaking from Herald OS.')
+      setTested(await speakWithFreeFallback('Hello. This is Hermes, speaking from Herald OS.', undefined, { notice: false }))
       config.reload()
       markSaved()
     } catch (error) {
-      notify({ title: 'Speech test failed', body: errorText(error), level: 'error' })
+      console.warn(`[voice] the test sentence could not be played: ${errorText(error)}`)
+      setTested('unplayable')
     } finally {
       setTesting(false)
     }
   }
+
+  const testReport = tested === 'unplayable' ? ({ tone: 'danger', text: t('voice.test.playbackFailed') } as const) : tested ? helloReport(tested) : null
 
   const saveLocalModel = async (model: string) => {
     try {
@@ -135,6 +153,30 @@ export function VoiceSection() {
   const todayMinutes = Math.round(liveSecondsToday(voice) / 60)
   const todayCost = ((liveSecondsToday(voice) / 60) * LIVE_RATE_PER_MINUTE).toFixed(2)
 
+  // Audio devices: Herald keeps its own microphone where it is one app among others, and the Sound
+  // panel in the menu bar shows the same control. Herald OS Linux sets the machine's devices instead.
+  const micDevices = useStore($inputDevices)
+  const micChoice = useStore($inputChoice)
+  const micLevel = useStore($micLevelPercent)
+
+  useEffect(() => watchAudioDevices(), [])
+
+  const automaticMic = micDevices.devices.find(device => device.isSystem)
+  // From the resolved choice, not the stored id: a device found by its name has a new id.
+  const selectedMic = micChoice.reason === 'chosen' && micChoice.device ? micChoice.device.id : AUTOMATIC_DEVICE
+  const micItems: readonly MenuItem[] = [
+    { id: AUTOMATIC_DEVICE, label: 'Automatic', description: automaticMic ? `Follow the system: ${automaticMic.label}` : 'Follow the system' },
+    ...micDevices.devices.map(device => ({ id: device.id, label: device.label, description: device.isSystem ? 'The system default right now' : undefined }))
+  ]
+  const micLabel = micDevices.devices.find(device => device.id === selectedMic)?.label ?? 'Automatic'
+
+  const selectMicrophone = async (id: string) => {
+    const device = micDevices.devices.find(one => one.id === id)
+
+    await chooseInputDevice(id === AUTOMATIC_DEVICE || !device ? null : { id: device.id, label: device.label })
+    markSaved()
+  }
+
   return (
     <>
       <SectionTitle title="Voice" subtitle="Talk to Hermes and hear it answer. Hermes stays the brain in every mode; only the audio path changes." />
@@ -149,6 +191,11 @@ export function VoiceSection() {
           description={mic === 'granted' ? 'Granted.' : mic === 'denied' || mic === 'restricted' ? 'Denied. Allow Herald OS under System Settings > Privacy & Security > Microphone.' : 'Not asked yet; the first conversation asks.'}
           keywords="permission privacy"
         >
+          {(mic === 'denied' || mic === 'restricted') && canOpenPrivacyPanes() && (
+            <GlassButton size="sm" onClick={() => void openPrivacyPane('microphone').catch(logFailure('shell.openExternal'))} aria-label="Open the Microphone pane in System Settings">
+              Open System Settings
+            </GlassButton>
+          )}
           {mic !== 'granted' && (
             <GlassButton size="sm" onClick={() => void requestMic()} aria-label="Request microphone access">
               Request access
@@ -160,7 +207,7 @@ export function VoiceSection() {
             Show commands
           </GlassButton>
         </SettingsRow>
-        <SettingsRow icon={<IconPlayerPlay />} label="Try it" description="Hear the configured voice, or start a conversation right here.">
+        <SettingsRow icon={<IconPlayerPlay />} label="Try it" description="Hear the configured voice, or start a conversation right here." below={testReport && <InlineNote tone={testReport.tone}>{testReport.text}</InlineNote>}>
           <GlassButton size="sm" onClick={() => void sayHello()} disabled={testing} aria-label="Play a test sentence">
             <IconVolume />
             {testing ? 'Speaking…' : 'Say hello'}
@@ -170,6 +217,33 @@ export function VoiceSection() {
           </GlassButton>
         </SettingsRow>
       </SettingsGroup>
+
+      {audioScope() === 'app' && (
+        <SettingsGroup title="Audio devices">
+          <SettingsRow
+            icon={<IconMicrophone />}
+            label="Microphone"
+            description={describeDeviceChoice(micChoice, 'input')}
+            keywords="microphone input device airpods bluetooth headset usb audio"
+            below={
+              voice.enabled ? (
+                <div className="flex items-center">
+                  <Meter value={micLevel} className="flex-1" />
+                </div>
+              ) : undefined
+            }
+          >
+            <MenuDropdown
+              ariaLabel="Microphone"
+              label={micLabel}
+              items={micItems}
+              value={selectedMic}
+              onSelect={id => void selectMicrophone(String(id))}
+              disabled={!voice.enabled}
+            />
+          </SettingsRow>
+        </SettingsGroup>
+      )}
 
       <SettingsGroup title="Engine">
         <SettingsRow

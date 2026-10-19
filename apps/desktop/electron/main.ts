@@ -1,10 +1,11 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Notification, protocol, shell } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, protocol, shell } from 'electron'
 import os from 'node:os'
 import path from 'node:path'
-import { type EnvInfo, type HeraldOSPrefs, IPC, type RestRequest, type ShellCommand, type WindowState } from '../shared/ipc.ts'
+import { type EnvInfo, type HeraldOSPrefs, IPC, type PrefsPatch, type RestRequest, type ShellCommand, type WindowState } from '../shared/ipc.ts'
 import { BackendManager } from './backend/manager.ts'
 import { forgetInheritedSession } from './backend/session-env.ts'
 import { CrashWatcher } from './crash/watch.ts'
+import { mayOpenExternally } from './external-url.ts'
 import { fireEventAutomations } from './events/automations.ts'
 import { events } from './events/bus.ts'
 import { runHooks } from './events/hooks.ts'
@@ -12,10 +13,12 @@ import { run } from './platform/exec.ts'
 import { startEventSources } from './events/sources.ts'
 import { registerAppsIpc } from './ipc/apps.ts'
 import { registerBridgeIpc } from './ipc/bridge.ts'
+import { registerCalcIpc } from './calc/ipc.ts'
 import { registerCanvasIpc } from './canvas/ipc.ts'
 import { registerModelIpc } from './canvas/model-ipc.ts'
 import { registerOfficeIpc } from './office/ipc.ts'
 import { MODEL_SCHEME } from '../shared/canvas/models.ts'
+import { normalizeRoomPrefs } from '../shared/room.ts'
 import { registerCaptureIpc } from './ipc/capture.ts'
 import { registerControlsIpc } from './ipc/controls.ts'
 import { registerCatalogIpc } from './ipc/catalog.ts'
@@ -30,14 +33,21 @@ import { registerThemeIpc, syncHermesSkin } from './ipc/theme.ts'
 import { applyVoiceHotkey, registerVoiceIpc } from './ipc/voice.ts'
 import { registerEditIpc } from './ipc/edit.ts'
 import { registerWebIpc } from './ipc/web.ts'
+import { systemLanguages } from './i18n.ts'
 import { log, logTail } from './log.ts'
 import { migrateLegacyData } from './migrate.ts'
+import { desktopEntryFor, heraldLaunch, nativeNotifier } from './native-notification.ts'
 import { registerNotificationHistoryIpc } from './notifications-history.ts'
 import { registerPetIpc } from './pet/ipc.ts'
 import { PetWindow } from './pet/window.ts'
+import { ActivityHub } from './room/activity.ts'
+import { registerRoomIpc } from './room/ipc.ts'
+import { RoomLog } from './room/log.ts'
 import { SwitchService } from './switches.ts'
-import { hermesHome, heraldOsDataDir, isDev } from './paths.ts'
+import { hermesHome, heraldOsDataDir, isDev, setPackaged } from './paths.ts'
 import { readPrefs, writePrefs } from './prefs.ts'
+import { handleAdoptLegacyNotify, sendPrefsToOthers } from './prefs-ipc.ts'
+import { forwardRendererConsole } from './renderer-console.ts'
 import { isOmarchy, readOmarchyTheme } from './theme/omarchy.ts'
 import { prefsForTheme } from './theme/themes.ts'
 import { ControlSocket } from './shell/control-socket.ts'
@@ -45,7 +55,7 @@ import { DesktopHost, type ShellHost } from './shell/host.ts'
 import { shellMode } from './shell/mode.ts'
 import { createCompositor, detectCompositor } from './wm/compositor.ts'
 import { NotificationDaemon } from './shell/notification-daemon.ts'
-import { handleUiRequest, OsCommandBridge, OsControlServer, osControlToken } from './shell/os-control.ts'
+import { desktopControlHandler, OsCommandBridge, OsControlServer, osControlToken } from './shell/os-control.ts'
 import { PanelShell } from './shell/panels.ts'
 import { registerBrandingIpc } from './shell/branding.ts'
 import { EmojiPanel } from './shell/emoji-panel.ts'
@@ -54,6 +64,7 @@ import { registerServiceIpc } from './shell/services.ts'
 import { WallpaperService } from './shell/wallpaper.ts'
 import { appIconPath, createMainWindow } from './window.ts'
 
+setPackaged(app.isPackaged)
 app.setName('Herald OS')
 // Chromium turns WebGL off where it does not accelerate the graphics (virtual machines, drivers it
 // blocklists), and Herald Canvas draws with WebGL: there it falls back to SwiftShader, Chromium's
@@ -71,6 +82,8 @@ protocol.registerSchemesAsPrivileged([
 // Electron shows a modal dialog for an uncaught main-process error and waits on it: the whole
 // shell, the Linux session included, would freeze behind a box nobody may see. Log it and go on.
 process.on('uncaughtException', error => log('main', `uncaught exception: ${error.stack ?? error.message}`))
+// Renderer faults go to each window's console (src/lib/report.ts), which only DevTools shows.
+forwardRendererConsole()
 
 // Started by a command a Hermes session ran, Herald OS inherits that session; the terminals, apps,
 // hooks and backend it starts must not pass for it (backend/session-env.ts).
@@ -97,8 +110,15 @@ const plugins = new PluginHost(
   () => (panels ? panels.mainWindow() : mainWindow),
   osBridge
 )
+/** The Room's live detail and activity log follow every change to the preferences made through this Herald. */
+function followRoomPrefs(next: HeraldOSPrefs): void {
+  const room = normalizeRoomPrefs(next.room)
+  activity.setPrefs(room)
+  void roomLog.setPrefs(room)
+}
 /** Preferences changed outside a renderer (the CLI, a theme): every window and the wallpaper follow. */
 function broadcastPrefs(next: HeraldOSPrefs): void {
+  followRoomPrefs(next)
   wallpaper?.apply(next.wallpaper)
 
   for (const win of BrowserWindow.getAllWindows()) {
@@ -118,6 +138,11 @@ const appHost = !panels && process.platform === 'linux' ? new DesktopHost(() => 
 // macOS: Cmd+Ctrl+E opens the emoji picker over any app (Herald OS Linux binds it in niri).
 const emojiPanel = !panels && process.platform === 'darwin' ? new EmojiPanel(() => mainWindow) : null
 const shellHost: ShellHost | null = panels ?? appHost
+// Where the backend and Hermes processes reach main: the compositor CLI's socket in panels mode, the OS control server's otherwise.
+const osControlPath = panels ? path.join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`, 'herald-os', 'control.sock') : path.join(heraldOsDataDir(), 'control.sock')
+// The Room's live activity from Hermes outside Herald and its activity log, both off until the person turns them on.
+const activity = new ActivityHub({ dataDir: heraldOsDataDir(), socket: osControlPath })
+const roomLog = new RoomLog({ dir: path.join(heraldOsDataDir(), 'room-log') })
 const control = shellHost
   ? new ControlSocket(
       shellHost,
@@ -128,57 +153,28 @@ const control = shellHost
         events.emit('theme-set', { theme: spec.name })
       },
       () => void switches.broadcast(),
-      plugins
+      plugins,
+      activity
     )
   : null
 // Desktop mode has no compositor CLI socket; the OS control server gives it the same `ui*` surface.
-const osControlPath = panels ? path.join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`, 'herald-os', 'control.sock') : path.join(heraldOsDataDir(), 'control.sock')
 const osControl = panels
   ? null
-  : new OsControlServer(osControlPath, async request => {
-      // No CLI talks to this socket (the Linux one serves `herald-os`), so every client is the backend.
-      if (request.token !== osControlToken()) {
-        return { ok: false, error: 'invalid control token' }
-      }
-
-      const ui = await handleUiRequest(request as unknown as Parameters<typeof handleUiRequest>[0], osBridge)
-
-      if (ui) {
-        return ui
-      }
-
-      // A few CLI conveniences the Linux socket also offers, relayed as ShellCommands.
-      const cmd = String(request.cmd ?? '')
-      const args = Array.isArray(request.args) ? (request.args as string[]) : []
-      const relay = (command: ShellCommand) => {
-        mainWindow?.webContents.send(IPC.shellCommand, command)
-        mainWindow?.show()
-      }
-
-      switch (cmd) {
-        case 'page':
-          relay({ type: 'show-page', args })
-
-          return { ok: true }
-        case 'notify':
-          relay({ type: 'notify', args })
-
-          return { ok: true }
-        case 'voice':
-          relay({ type: 'voice', args: [args[0] ?? 'toggle'] })
-
-          return { ok: true }
-        case 'os':
-          relay({ type: 'os', args: [args[0]], payload: args[1] ? (JSON.parse(args[1]) as Record<string, unknown>) : undefined })
-
-          return { ok: true }
-        default:
-          return { ok: false, error: `unknown command ${cmd}` }
-      }
-    })
+  : new OsControlServer(
+      osControlPath,
+      desktopControlHandler({
+        bridge: osBridge,
+        activity,
+        relay: command => {
+          mainWindow?.webContents.send(IPC.shellCommand, command)
+          mainWindow?.show()
+        }
+      })
+    )
 backend.setControl(osControlPath, osControlToken())
 // Serves org.freedesktop.Notifications so other apps' notifications reach the shell.
 const notifications = panels ? new NotificationDaemon(panels) : null
+const notifyNative = nativeNotifier({ shellServes: () => notifications?.serving() ?? false, desktopEntry: process.platform === 'linux' ? desktopEntryFor(heraldLaunch(Boolean(panels), isOmarchy(), detectCompositor())) : null })
 /** Deliver a ShellCommand to the Hermes window; panels mode queues it until that window has loaded. */
 const toHermesWindow = (command: ShellCommand) => (panels ? panels.relay('main', command) : mainWindow?.webContents.send(IPC.shellCommand, command))
 const crashes = new CrashWatcher(
@@ -212,14 +208,7 @@ function registerCoreIpc(): void {
   ipcMain.handle(IPC.backendRest, (_event, request: RestRequest) => backend.rest(request))
   ipcMain.handle(IPC.backendLogTail, (_event, lines: number) => [...logTail(lines), ...backend.getState().logTail])
 
-  ipcMain.handle(IPC.notifyNative, (_event, title: string, body: string) => {
-    if (Notification.isSupported()) {
-      const notification = new Notification({ title: String(title).slice(0, 120), body: String(body).slice(0, 400), silent: true })
-      // macOS only shows notifications from code-signed apps; unsigned builds fail here.
-      notification.on('failed', (_event, error) => log('notify', `native notification failed: ${error}`))
-      notification.show()
-    }
-  })
+  ipcMain.handle(IPC.notifyNative, (_event, title: string, body: string) => notifyNative(title, body))
 
   ipcMain.handle(IPC.windowGetState, () => (mainWindow ? windowState(mainWindow) : { fullscreen: false, focused: false }))
   ipcMain.handle(IPC.windowToggleFullscreen, () => {
@@ -229,17 +218,21 @@ function registerCoreIpc(): void {
   })
   ipcMain.handle(IPC.windowQuit, () => app.quit())
 
-  ipcMain.handle(IPC.shellOpenExternal, (_event, url: string) => {
-    if (/^https?:\/\//i.test(url)) {
+  ipcMain.handle(IPC.shellOpenExternal, (_event, url: unknown) => {
+    if (mayOpenExternally(url)) {
       return shell.openExternal(url)
     }
 
-    throw new Error('only http(s) URLs may be opened externally')
+    throw new Error(process.platform === 'darwin' ? 'only http(s) URLs and Privacy & Security settings may be opened externally' : 'only http(s) URLs may be opened externally')
   })
 
   ipcMain.handle(IPC.prefsGet, () => readPrefs())
-  ipcMain.handle(IPC.prefsSet, (_event, patch: Partial<HeraldOSPrefs>) => {
+  ipcMain.handle(IPC.prefsSet, (_event, patch: PrefsPatch) => {
     const next = writePrefs(patch)
+
+    if (patch.room) {
+      followRoomPrefs(next)
+    }
 
     if ('wallpaper' in patch) {
       wallpaper?.apply(next.wallpaper)
@@ -263,18 +256,15 @@ function registerCoreIpc(): void {
     }
 
     // Every surface window sees the same preferences.
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (win.webContents !== _event.sender) {
-        win.webContents.send(IPC.prefsChanged, next)
-      }
-    }
+    sendPrefsToOthers(BrowserWindow.getAllWindows(), _event.sender, next)
 
     return next
   })
+  ipcMain.handle(IPC.prefsAdoptLegacyNotify, (event, flags: unknown) => handleAdoptLegacyNotify(BrowserWindow.getAllWindows(), event.sender, flags))
 
   ipcMain.handle(
     IPC.envInfo,
-    (): EnvInfo => ({ platform: process.platform, hermesHome: hermesHome(), homeDir: os.homedir(), version: app.getVersion(), isDev, shellMode: mode })
+    (): EnvInfo => ({ platform: process.platform, hermesHome: hermesHome(), homeDir: os.homedir(), version: app.getVersion(), isDev: isDev(), shellMode: mode, languages: systemLanguages() })
   )
 
   registerFsIpc(() => mainWindow)
@@ -300,6 +290,8 @@ function registerCoreIpc(): void {
   registerControlsIpc()
   registerNotificationHistoryIpc()
   registerPetIpc({ hermesWindow: () => (panels ? panels.mainWindow() : mainWindow), petWindow })
+  registerRoomIpc({ activity, log: roomLog })
+  registerCalcIpc({ dir: path.join(heraldOsDataDir(), 'calc'), prefs: () => readPrefs().calc })
   registerDictationIpc(() => (panels ? panels.mainWindow() : mainWindow))
   registerCatalogIpc()
   registerSetupIpc()
@@ -356,9 +348,9 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
-  log('main', `Herald OS ${app.getVersion()} starting (dev=${isDev}, mode=${mode}, HERMES_HOME=${hermesHome()})`)
+  log('main', `Herald OS ${app.getVersion()} starting (dev=${isDev()}, mode=${mode}, HERMES_HOME=${hermesHome()})`)
   // A packaged app carries its icon in the bundle; `electron .` would show Electron's.
-  const icon = isDev ? appIconPath() : undefined
+  const icon = isDev() ? appIconPath() : undefined
 
   if (icon && process.platform === 'darwin') {
     app.dock?.setIcon(icon)
@@ -375,6 +367,10 @@ app.whenReady().then(async () => {
     }
   })
   createWindow()
+  // Once the sockets listen: the control file names one of them.
+  const room = normalizeRoomPrefs(readPrefs().room)
+  activity.start(room)
+  void roomLog.setPrefs(room)
   // Cmd+Ctrl+F is the standard macOS fullscreen toggle; register it as a local shortcut so the
   // user can always leave the environment. Only this shortcut follows focus: the voice hotkey
   // (ipc/voice.ts) must keep working while another app is in front.
@@ -424,6 +420,8 @@ app.on('before-quit', event => {
   emojiPanel?.stop()
   control?.stop()
   osControl?.stop()
+  activity.stop()
+  roomLog.stop()
   wallpaper?.stop()
   notifications?.stop()
   panels?.stop()

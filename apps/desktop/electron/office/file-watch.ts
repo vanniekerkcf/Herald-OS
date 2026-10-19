@@ -62,6 +62,9 @@ export class FileWatcher {
     })
     this.poll = setInterval(() => void this.probe(), this.pollMs)
     this.poll.unref()
+    // A folder watch reports nothing until the system has set it up (on macOS, a moment after `watch` returns):
+    // one check after starting finds what changed before then.
+    this.schedule()
   }
 
   stop(): void {
@@ -152,11 +155,15 @@ export class FileWatcher {
     }, this.delayMs)
   }
 
-  async check(): Promise<void> {
+  /**
+   * Compares the file with the version the window has and reports it when they differ. Resolves to
+   * false when it could not tell (Herald saving, the file changing while it was read, or unreadable).
+   */
+  async check(): Promise<boolean> {
     if (this.writing) {
       this.schedule()
 
-      return
+      return false
     }
 
     if (this.running) {
@@ -164,15 +171,28 @@ export class FileWatcher {
     }
 
     try {
+      const before = await this.statStamp()
       const stamp = await stampOf(this.file)
       const digest = stamp?.digest ?? null
 
-      if (this.running && digest !== this.known && !this.writing) {
+      // A check can run into a save, Herald's or another app's, before that save's events arrive: what it read
+      // of a file that changed meanwhile (a save in place empties it before filling it again) is no version to
+      // report, so it looks again.
+      if ((await this.statStamp()) !== before || this.writing) {
+        this.schedule()
+
+        return false
+      }
+
+      if (this.running && digest !== this.known) {
         this.known = digest
         this.onChange(digest)
       }
+
+      return true
     } catch {
       // Unreadable mid-write: the next change or poll checks again.
+      return false
     }
   }
 }

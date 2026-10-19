@@ -1,10 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { CALC_PREFS_DEFAULTS, mergeCalcPrefs, normalizeCalcPrefs } from '../shared/calc.ts'
 import { type EventAutomation, isEventName } from '../shared/events.ts'
-import type { ContinuityPrefs, CrashHelpPrefs, HeraldOSPrefs } from '../shared/ipc.ts'
+import { languageSetting } from '../shared/i18n.ts'
+import type { ContinuityPrefs, CrashHelpPrefs, HeraldOSPrefs, NotifyPrefs, PrefsPatch } from '../shared/ipc.ts'
 import { normalizeMenuBar } from '../shared/menu-bar.ts'
+import { NOTIFY_DEFAULTS, normalizeNotifyPrefs } from '../shared/notify-prefs.ts'
 import { normalizeCommentName } from '../shared/office/comment-name.ts'
 import { normalizePetPrefs, PET_PREFS_DEFAULTS } from '../shared/pet.ts'
+import { mergeRoomPrefs, normalizeRoomPrefs, ROOM_PREFS_DEFAULTS } from '../shared/room.ts'
 import { normalizeVoicePrefs, VOICE_DEFAULTS } from '../shared/voice-prefs.ts'
 import { heraldOsDataDir } from './paths.ts'
 
@@ -15,7 +19,10 @@ const DEFAULTS: HeraldOSPrefs = {
   voice: VOICE_DEFAULTS,
   continuity: CONTINUITY_DEFAULTS,
   crashHelp: CRASH_HELP_DEFAULTS,
+  notify: NOTIFY_DEFAULTS,
   pet: PET_PREFS_DEFAULTS,
+  room: ROOM_PREFS_DEFAULTS,
+  calc: CALC_PREFS_DEFAULTS,
   fullscreenOnLaunch: true,
   reduceMotion: false,
   accent: 'blue',
@@ -43,12 +50,16 @@ export function readPrefs(): HeraldOSPrefs {
     return {
       ...DEFAULTS,
       ...parsed,
+      language: languageSetting(parsed.language),
       accent: (accent as HeraldOSPrefs['accent']) ?? DEFAULTS.accent,
       spaces: parsed.spaces?.length ? parsed.spaces : DEFAULTS.spaces,
       voice: normalizeVoicePrefs(parsed.voice),
       continuity: normalizeContinuity(parsed.continuity),
       crashHelp: normalizeCrashHelp(parsed.crashHelp),
+      notify: normalizeNotifyPrefs(parsed.notify),
       pet: normalizePetPrefs(parsed.pet),
+      room: normalizeRoomPrefs(parsed.room),
+      calc: normalizeCalcPrefs(parsed.calc),
       eventAutomations: normalizeEventAutomations(parsed.eventAutomations),
       commentName: normalizeCommentName(parsed.commentName) || undefined,
       ...(parsed.menuBar ? { menuBar: normalizeMenuBar(parsed.menuBar) } : {})
@@ -85,8 +96,9 @@ function normalizeContinuity(value: Partial<ContinuityPrefs> | undefined): Conti
   return { ...CONTINUITY_DEFAULTS, ...value, enabled, exclude }
 }
 
-export function writePrefs(patch: Partial<HeraldOSPrefs>): HeraldOSPrefs {
+export function writePrefs(patch: PrefsPatch): HeraldOSPrefs {
   const current = readPrefs()
+  const notify = { ...storedNotify(), ...explicitNotify(patch.notify) }
   // Nested objects are patched field by field by their callers; merge instead of replacing.
   const next = {
     ...current,
@@ -94,12 +106,44 @@ export function writePrefs(patch: Partial<HeraldOSPrefs>): HeraldOSPrefs {
     voice: normalizeVoicePrefs({ ...current.voice, ...(patch.voice ?? {}) }),
     continuity: normalizeContinuity({ ...current.continuity, ...(patch.continuity ?? {}) }),
     crashHelp: normalizeCrashHelp({ ...current.crashHelp, ...(patch.crashHelp ?? {}) }),
+    notify: normalizeNotifyPrefs(notify),
     pet: normalizePetPrefs({ ...current.pet, ...(patch.pet ?? {}) }),
+    room: mergeRoomPrefs(current.room, patch.room),
+    calc: mergeCalcPrefs(current.calc, patch.calc),
     ...('commentName' in patch ? { commentName: normalizeCommentName(patch.commentName) || undefined } : {}),
+    ...('language' in patch ? { language: languageSetting(patch.language) } : {}),
     ...(patch.menuBar ? { menuBar: normalizeMenuBar({ ...current.menuBar, ...patch.menuBar }) } : {})
   }
   fs.mkdirSync(heraldOsDataDir(), { recursive: true })
-  fs.writeFileSync(prefsFile(), JSON.stringify(next, null, 2))
+  // Only the switches someone set go to disk, so a later migration can tell them from the defaults.
+  fs.writeFileSync(prefsFile(), JSON.stringify({ ...next, notify }, null, 2))
 
   return next
+}
+
+/** The known Alerts switches in `value` that hold a boolean; everything else is dropped. */
+function explicitNotify(value: unknown): Partial<NotifyPrefs> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  return Object.fromEntries(Object.entries(value).filter(([key, flag]) => Object.hasOwn(NOTIFY_DEFAULTS, key) && typeof flag === 'boolean'))
+}
+
+/** The Alerts switches as saved on disk, before defaults fill the gaps; none when the file is missing or unreadable. */
+function storedNotify(): Partial<NotifyPrefs> {
+  try {
+    return explicitNotify((JSON.parse(fs.readFileSync(prefsFile(), 'utf8')) as { notify?: unknown } | null)?.notify)
+  } catch {
+    return {}
+  }
+}
+
+/** Switches a window kept in localStorage: each one is saved only when prefs.json has no value for it yet. */
+export function adoptLegacyNotify(flags: unknown): HeraldOSPrefs {
+  // Comes over IPC: only known switches holding a boolean count.
+  const saved = storedNotify()
+  const missing = Object.fromEntries(Object.entries(explicitNotify(flags)).filter(([key]) => !Object.hasOwn(saved, key)))
+
+  return Object.keys(missing).length ? writePrefs({ notify: missing }) : readPrefs()
 }

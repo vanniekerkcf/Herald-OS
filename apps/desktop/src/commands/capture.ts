@@ -1,4 +1,5 @@
 import type { CaptureTool, ScreenshotMode } from '../../shared/ipc.ts'
+import { parseQrReading, QR_COPIED, type QrReading } from '../../shared/qr.ts'
 import { CLI_UNAVAILABLE_MESSAGE, runHeraldOs } from '../lib/herald-os-cli.ts'
 import { $env } from '../store/backend.ts'
 import { $recording, askAbout, offerCapture } from '../store/capture.ts'
@@ -21,8 +22,8 @@ async function linuxTool(argv: string[], title: string) {
 
 const isMac = () => $env.get()?.platform === 'darwin'
 
-/** The colour picker, a QR code or text from the screen: macOS's own tools, through main. */
-async function screenTool(tool: CaptureTool, linuxArgv: string[], title: string) {
+/** The colour picker or text from the screen: macOS's own tools, through main. */
+async function screenTool(tool: Exclude<CaptureTool, 'qr'>, linuxArgv: string[], title: string) {
   if (!isMac()) {
     return linuxTool(linuxArgv, title)
   }
@@ -34,12 +35,64 @@ async function screenTool(tool: CaptureTool, linuxArgv: string[], title: string)
   }
 
   if (!result.text) {
-    return fail(tool === 'qr' ? 'No QR code or barcode in that part of the screen.' : 'No text in that part of the screen.')
+    return fail('No text in that part of the screen.')
   }
 
-  const summary = tool === 'colour' ? `Copied ${result.text}` : tool === 'qr' ? `Copied: ${result.text.length > 80 ? `${result.text.slice(0, 79)}…` : result.text}` : `Copied ${result.lines === 1 ? 'a line' : `${result.lines} lines`} of text`
+  const summary = tool === 'colour' ? `Copied ${result.text}` : `Copied ${result.lines === 1 ? 'a line' : `${result.lines} lines`} of text`
 
   return ok(summary, { data: { text: result.text } })
+}
+
+/**
+ * What a QR code says stays on the clipboard: the caption (and the voice) say what kind of thing it
+ * is, and Hermes gets the contents only when they are an ordinary link or text.
+ */
+function qrResult(reading: QrReading) {
+  const { kind, caption, description, text, link } = reading
+  const hidden = {
+    kind,
+    description,
+    ...(link === undefined ? {} : { link }),
+    onClipboard: true,
+    note:
+      link === undefined
+        ? 'The contents are on the clipboard for the person to paste and are kept out of this conversation; do not ask for them.'
+        : 'This is the link without the parts that looked secret; the whole link is on the clipboard for the person to paste. Do not ask for the missing parts.'
+  }
+
+  return ok(caption, { data: text === undefined ? hidden : { kind, description, text } })
+}
+
+const SEVERAL_CODES = 'Several codes in that part of the screen, so nothing was copied; select just one.'
+
+async function readQr() {
+  if (isMac()) {
+    // Main copies the code and sends back only its description.
+    const result = await window.heraldOS.capture.tool('qr')
+
+    if (result.cancelled) {
+      return fail('QR code: cancelled.')
+    }
+
+    if ((result.codes ?? 0) > 1) {
+      return fail(SEVERAL_CODES)
+    }
+
+    return result.qr ? qrResult(result.qr) : fail('No QR code or barcode in that part of the screen.')
+  }
+
+  const outcome = await runHeraldOs(['capture', 'qr', '--json'])
+
+  if (outcome.unavailable) {
+    return fail(`QR code: ${CLI_UNAVAILABLE_MESSAGE.toLowerCase()}.`)
+  }
+
+  if (!outcome.ok) {
+    return fail(outcome.output || 'QR code did not work')
+  }
+
+  // An older CLI prints the contents themselves; say only that something was copied.
+  return qrResult(parseQrReading(outcome.output) ?? { kind: 'secret', caption: QR_COPIED, description: 'a QR code' })
 }
 
 export const captureCommands: readonly OsCommand[] = [
@@ -140,11 +193,11 @@ export const captureCommands: readonly OsCommand[] = [
   {
     id: 'capture.qr',
     title: 'Read a QR code',
-    description: 'Select a QR code or barcode on screen and copy what it says.',
+    description: 'Select a QR code or barcode on screen and copy what it says. You get ordinary links and text in full, and a link that carries a secret without it (or as its host alone); for a 2FA setup code, Wi-Fi details, a card number or anything that looks like a password you only get what kind of thing it is, and the contents stay on the clipboard.',
     tier: 'act',
     args: [],
     phrases: ['read this qr code', 'scan the qr code'],
-    run: () => screenTool('qr', ['capture', 'qr'], 'QR code')
+    run: () => readQr()
   },
   {
     id: 'capture.text',

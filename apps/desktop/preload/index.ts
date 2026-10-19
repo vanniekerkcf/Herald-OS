@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import {
+  type AttachmentFile,
   type AudioWsKind,
   type AuditEntry,
   type BackendState,
@@ -18,6 +19,7 @@ import {
   type CatalogResult,
   type SetupResult,
   type SetupState,
+  type TypeResult,
   type ClipboardEntry,
   type ContextReturn,
   type ContextSnapshot,
@@ -29,6 +31,7 @@ import {
   type DirEntry,
   type EditAction,
   type EnvInfo,
+  type FileLockResult,
   type FilePreview,
   type HeraldOSPrefs,
   type ImageInfo,
@@ -36,6 +39,7 @@ import {
   IPC,
   type MicPermission,
   type NetworkStatus,
+  type NotifyPrefs,
   type OfficeChangedEvent,
   type OfficeFileData,
   type OfficePdfRequest,
@@ -50,6 +54,7 @@ import {
   type OfficeWriteResult,
   type OsControlReply,
   type OsControlRequest,
+  type PrefsPatch,
   type ProcessInfo,
   type RecentFile,
   type RecordingState,
@@ -65,7 +70,9 @@ import {
   type SwitchName,
   type SwitchState,
   type SystemInfo,
+  type SystemSpeech,
   type SystemStats,
+  type TerminalClipboardRead,
   type TerminalCreateOptions,
   type TerminalHandle,
   type TreeChangedEvent,
@@ -75,14 +82,17 @@ import {
   type WebViewEvent,
   type WindowState,
   type WmAction,
-  type WmState
+  type WmState,
+  type WriteTextOptions
 } from '../shared/ipc.ts'
 import type { BrandingPatch, BrandingView } from '../shared/branding.ts'
+import type { CalcBridge, CalcChange, CalcHistoryEntry, CalcHistoryInput, CalcNote, CalcNoteSummary, CalcRatesState } from '../shared/calc.ts'
 import type { ModelId, ModelProgress, ModelStatus } from '../shared/canvas/models.ts'
 import type { OfficeAbilities, OfficeApp } from '../shared/office/files.ts'
 import type { MenuExtensions } from '../shared/menu-extensions.ts'
 import type { PetAction, PetBridge, PetCover, PetInfo, PetRect, PetSnapshot, PetWindowPlacement } from '../shared/pet.ts'
 import type { PluginMethod, PluginView } from '../shared/plugins.ts'
+import type { RoomActivity, RoomBridge, RoomLogDay, RoomLogEntry } from '../shared/room.ts'
 import type { HeraldEvent } from '../shared/events.ts'
 import type { ThemeSpec, ThemeSummary } from '../shared/theme.ts'
 
@@ -98,6 +108,14 @@ const subscribe = <T,>(channel: string, listener: (payload: T) => void): Unsubsc
   ipcRenderer.on(channel, wrapped)
 
   return () => ipcRenderer.removeListener(channel, wrapped)
+}
+
+// Main sends this window live activity only while one of these listens.
+const activityListeners = new Set<(events: RoomActivity[]) => void>()
+const hearActivity = (_event: unknown, events: RoomActivity[]) => {
+  for (const listener of [...activityListeners]) {
+    listener(events)
+  }
 }
 
 /** The whole capability surface the renderer gets. Keep it narrow and typed. */
@@ -141,15 +159,22 @@ const api = {
     find: (query: string, limit = 10): Promise<RecentFile[]> => ipcRenderer.invoke(IPC.fsFind, query, limit),
     thumbnail: (target: string, size = 512): Promise<string | null> => ipcRenderer.invoke(IPC.fsThumbnail, target, size),
     imageInfo: (target: string): Promise<ImageInfo | null> => ipcRenderer.invoke(IPC.fsImageInfo, target),
-    writeText: (target: string, content: string): Promise<void> => ipcRenderer.invoke(IPC.fsWriteText, target, content),
+    /** False only when `options.expect` no longer held, in which case nothing was written. */
+    writeText: (target: string, content: string, options?: WriteTextOptions): Promise<boolean> => ipcRenderer.invoke(IPC.fsWriteText, target, content, options),
+    /** Hold the exclusive lock on `lockPath` (as Hermes's memory tool does), waiting up to `timeoutMs`. */
+    lock: (lockPath: string, timeoutMs: number): Promise<FileLockResult> => ipcRenderer.invoke(IPC.fsLock, lockPath, timeoutMs),
+    unlock: (id: string): Promise<void> => ipcRenderer.invoke(IPC.fsUnlock, id),
     mkdir: (target: string): Promise<void> => ipcRenderer.invoke(IPC.fsMkdir, target),
     rename: (from: string, to: string): Promise<void> => ipcRenderer.invoke(IPC.fsRename, from, to),
     trash: (targets: string[]): Promise<void> => ipcRenderer.invoke(IPC.fsTrash, targets),
     exportPdf: (html: string, suggestedName: string): Promise<string | null> => ipcRenderer.invoke(IPC.fsExportPdf, html, suggestedName),
     pickFiles: (options?: { directory?: boolean; multiple?: boolean }): Promise<string[]> => ipcRenderer.invoke(IPC.fsPickFiles, options ?? {}),
+    /** A picked file (or one Herald made for a prompt), read whole up to `maxBytes`, for Hermes to receive. */
+    attachment: (target: string, maxBytes: number): Promise<AttachmentFile> => ipcRenderer.invoke(IPC.fsAttachment, target, maxBytes),
     dirSize: (target: string): Promise<{ bytes: number; files: number; complete: boolean }> => ipcRenderer.invoke(IPC.fsDirSize, target),
     listTree: (root: string, limit = 3000): Promise<{ entries: TreeEntry[]; truncated: boolean }> => ipcRenderer.invoke(IPC.fsListTree, root, limit),
-    watchTree: (root: string): Promise<string> => ipcRenderer.invoke(IPC.fsWatchTree, root),
+    /** The watch's id, or `null` where nothing is watched (the home folder). */
+    watchTree: (root: string): Promise<string | null> => ipcRenderer.invoke(IPC.fsWatchTree, root),
     unwatchTree: (watchId: string): Promise<void> => ipcRenderer.invoke(IPC.fsUnwatchTree, watchId),
     onTreeChanged: (listener: (event: TreeChangedEvent) => void): Unsubscribe => subscribe(IPC.fsTreeChanged, listener),
     /** Absolute path of a File dropped from Finder (Electron removed File.path). */
@@ -315,6 +340,40 @@ const api = {
       return off
     }
   } satisfies PetBridge,
+  room: {
+    watchActivity: (listener: (events: RoomActivity[]) => void): Unsubscribe => {
+      const own = (events: RoomActivity[]) => listener(events)
+      activityListeners.add(own)
+
+      // Only the first listener hears what came in lately: main sends it as this window starts watching.
+      if (activityListeners.size === 1) {
+        ipcRenderer.on(IPC.roomActivity, hearActivity)
+        ipcRenderer.send(IPC.roomActivityWatch, true)
+      }
+
+      return () => {
+        if (activityListeners.delete(own) && activityListeners.size === 0) {
+          ipcRenderer.removeListener(IPC.roomActivity, hearActivity)
+          ipcRenderer.send(IPC.roomActivityWatch, false)
+        }
+      }
+    },
+    appendLog: (entries: RoomLogEntry[]): void => ipcRenderer.send(IPC.roomLogAppend, entries),
+    logDays: (): Promise<RoomLogDay[]> => ipcRenderer.invoke(IPC.roomLogDays),
+    readLog: (day: string): Promise<RoomLogEntry[]> => ipcRenderer.invoke(IPC.roomLogRead, day),
+    deleteLog: (): Promise<void> => ipcRenderer.invoke(IPC.roomLogDelete)
+  } satisfies RoomBridge,
+  calc: {
+    rates: (options?: { cached?: boolean; refresh?: boolean }): Promise<CalcRatesState> => ipcRenderer.invoke(IPC.calcRates, options ?? {}),
+    listNotes: (): Promise<CalcNoteSummary[]> => ipcRenderer.invoke(IPC.calcNotesList),
+    readNote: (id: string): Promise<CalcNote | null> => ipcRenderer.invoke(IPC.calcNoteRead, id),
+    saveNote: (note: { id?: string; text: string }): Promise<CalcNote> => ipcRenderer.invoke(IPC.calcNoteSave, note),
+    deleteNote: (id: string): Promise<void> => ipcRenderer.invoke(IPC.calcNoteDelete, id),
+    history: (limit?: number): Promise<CalcHistoryEntry[]> => ipcRenderer.invoke(IPC.calcHistory, limit),
+    addHistory: (entries: CalcHistoryInput[]): Promise<void> => ipcRenderer.invoke(IPC.calcHistoryAdd, entries),
+    clearHistory: (): Promise<void> => ipcRenderer.invoke(IPC.calcHistoryClear),
+    onChanged: (listener: (what: CalcChange) => void): Unsubscribe => subscribe(IPC.calcChanged, listener)
+  } satisfies CalcBridge,
   catalog: {
     /** The install catalog with each entry's state on this machine (Linux: everything; macOS: what installs here). */
     list: (): Promise<CatalogGroupView[]> => ipcRenderer.invoke(IPC.catalogList),
@@ -350,8 +409,8 @@ const api = {
     finish: (options: { later?: boolean } = {}): Promise<SetupResult> => ipcRenderer.invoke(IPC.setupFinish, options)
   },
   dictation: {
-    /** Type text into the focused app (any app); `copied` when it could only be left on the clipboard. */
-    type: (text: string, options: { submit?: boolean; delayMs?: number } = {}): Promise<{ typed: boolean; copied: boolean }> => ipcRenderer.invoke(IPC.dictationType, text, options)
+    /** Type text into the focused app (any app); `copied` when it could only be left on the clipboard, `missing` when a macOS permission is why. */
+    type: (text: string, options: { submit?: boolean; delayMs?: number } = {}): Promise<TypeResult> => ipcRenderer.invoke(IPC.dictationType, text, options)
   },
   events: {
     /** Events Herald OS saw lately (login, wake, crash, low battery, …), newest first. */
@@ -379,6 +438,9 @@ const api = {
     write: (id: string, data: string): void => ipcRenderer.send(IPC.terminalWrite, id, data),
     resize: (id: string, cols: number, rows: number): void => ipcRenderer.send(IPC.terminalResize, id, cols, rows),
     dispose: (id: string): Promise<void> => ipcRenderer.invoke(IPC.terminalDispose, id),
+    /** The system clipboard's text, read in main: the shell's pages may not read the clipboard themselves. */
+    readClipboard: (): Promise<TerminalClipboardRead> => ipcRenderer.invoke(IPC.terminalClipboardRead),
+    writeClipboard: (text: string): Promise<void> => ipcRenderer.invoke(IPC.terminalClipboardWrite, text),
     onData: (listener: (id: string, data: string) => void): Unsubscribe => {
       const wrapped = (_event: unknown, id: string, data: string) => listener(id, data)
       ipcRenderer.on(IPC.terminalData, wrapped)
@@ -460,7 +522,9 @@ const api = {
   },
   prefs: {
     get: (): Promise<HeraldOSPrefs> => ipcRenderer.invoke(IPC.prefsGet),
-    set: (patch: Partial<HeraldOSPrefs>): Promise<HeraldOSPrefs> => ipcRenderer.invoke(IPC.prefsSet, patch),
+    set: (patch: PrefsPatch): Promise<HeraldOSPrefs> => ipcRenderer.invoke(IPC.prefsSet, patch),
+    /** Alerts switches from this window's localStorage, saved only where prefs.json has none yet. */
+    adoptLegacyNotify: (flags: Partial<NotifyPrefs>): Promise<HeraldOSPrefs> => ipcRenderer.invoke(IPC.prefsAdoptLegacyNotify, flags),
     /** Preferences changed from another surface window. */
     onChanged: (listener: (prefs: HeraldOSPrefs) => void): Unsubscribe => subscribe(IPC.prefsChanged, listener)
   },
@@ -476,6 +540,8 @@ const api = {
     requestMicrophone: (): Promise<MicPermission> => ipcRenderer.invoke(IPC.voiceRequestMicrophone),
     /** Tokenized URL for an authenticated audio WebSocket (speak-stream). */
     audioWsUrl: (kind: AudioWsKind): Promise<string> => ipcRenderer.invoke(IPC.voiceAudioWsUrl, kind),
+    /** A line said by the computer's own voice as a WAV clip, for when Hermes cannot speak. */
+    systemSpeech: (text: string): Promise<SystemSpeech> => ipcRenderer.invoke(IPC.voiceSystemSpeech, text),
     /** The global voice hotkey was pressed (fires in every window; the main surface acts). */
     onHotkey: (listener: () => void): Unsubscribe => subscribe<void>(IPC.voiceHotkey, () => listener())
   },

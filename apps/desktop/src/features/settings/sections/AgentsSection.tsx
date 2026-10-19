@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
-import { IconBolt, IconCloud, IconCpu, IconFileText, IconHistory, IconKey, IconLock, IconMessage, IconRefresh, IconScale, IconSearch, IconUsers } from '@tabler/icons-react'
+import { IconBolt, IconCloud, IconCpu, IconFileText, IconHistory, IconLock, IconMessage, IconScale, IconSearch, IconUsers } from '@tabler/icons-react'
 import { useMemo, useState } from 'react'
+import type { TextKey } from '../../../../shared/i18n.ts'
 import type { AuditEntry } from '../../../../shared/ipc.ts'
 import { HermesAvatar } from '../../../components/app-icon.tsx'
 import { Dropdown, GlassButton, GlassCard, LinkAction, Pill, type PillTone, StatusDot, Toggle } from '../../../components/ui/glass.tsx'
@@ -10,40 +11,53 @@ import { rest } from '../../../lib/rest.ts'
 import { useBackendData, useLocalData } from '../../../lib/use-async.ts'
 import { $activeChat } from '../../../store/chat.ts'
 import { $connection, gatewayRequest } from '../../../store/gateway.ts'
-import { $hermesAuth, loginTarget, refreshHermesAuth, requestHermesLogin } from '../../../store/hermes-auth.ts'
+import { $providerChanges, type ModelChange, setHermesModel } from '../../../store/model-provider.ts'
 import { notify } from '../../../store/notifications.ts'
 import { readTier, withTier } from './policy.ts'
+import { MemoryProviderRow } from './MemoryProviderRow.tsx'
+import { ModelConfirm, ModelProviderRow } from './ProviderRow.tsx'
+import { t, useT } from '../../../store/i18n.ts'
 import { errorText, InlineNote, markSaved, MenuDropdown, RadioCard, SectionTitle, SettingsBlock, SettingsGroup, SettingsRow, Stepper, useDismiss } from './shared.tsx'
 import { ToolSearchRow } from './ToolSearchRow.tsx'
 
 /*
  * Hermes & agents: the default Settings section. Every control here binds to real Hermes state:
  *   approvals.mode (gateway config.get/set)            -> Autonomy cards
- *   model.options + slash /model                       -> Preferred model
+ *   model.options, /api/providers/oauth, /api/env      -> Model provider (ProviderRow.tsx)
+ *   model.options + /api/model/set + config.set model  -> Preferred model
  *   /api/tools/terminal/backend(s)                     -> Run on
  *   delegation.max_concurrent_children (/api/config)   -> Background agents
  *   `memory` toolset (/api/tools/toolsets)             -> Remember preferences
+ *   memory.provider (/api/memory)                      -> Memory provider (MemoryProviderRow.tsx)
  *   bridge policy tier `act`                           -> Ask before sending messages
  *   bridge audit log                                   -> Activity history
  */
 
+const CONNECTION: Partial<Record<string, TextKey>> = {
+  open: 'settings.agents.ready',
+  connecting: 'settings.agents.connecting',
+  error: 'settings.agents.connectionError',
+  closed: 'settings.agents.disconnected'
+}
+
 export function AgentsSection() {
+  const t = useT()
   const connection = useStore($connection)
   const ready = connection === 'open'
 
   return (
     <>
-      <SectionTitle title="Hermes & agents" subtitle="Choose how Hermes works with you." />
+      <SectionTitle title={t('settings.section.agents')} subtitle={t('settings.agents.subtitle')} />
 
-      <SettingsBlock label="Hermes" description="Personal agent" keywords="status identity ready connecting">
+      <SettingsBlock label={t('app.hermes')} description={t('settings.agents.personalAgent')} keywords="status identity ready connecting">
         <GlassCard className="flex items-center gap-3.5 px-4 py-3">
           <HermesAvatar size={44} rounded={11} />
           <div className="min-w-0 flex-1">
-            <div className="text-[13.5px] font-semibold text-fg">Hermes</div>
-            <div className="text-[12px] text-fg-3">Personal agent</div>
+            <div className="text-[13.5px] font-semibold text-fg">{t('app.hermes')}</div>
+            <div className="text-[12px] text-fg-3">{t('settings.agents.personalAgent')}</div>
             <div className="mt-1 flex items-center gap-1.5 text-[12px] text-fg-2">
               <StatusDot tone={ready ? 'ok' : connection === 'error' || connection === 'closed' ? 'danger' : 'warn'} pulse={!ready} />
-              {ready ? 'Ready' : connection === 'connecting' ? 'Connecting' : connection === 'error' ? 'Connection error' : connection === 'closed' ? 'Disconnected' : 'Waiting for Hermes'}
+              {t(CONNECTION[connection] ?? 'menuBar.waitingForHermes')}
             </div>
           </div>
         </GlassCard>
@@ -51,19 +65,20 @@ export function AgentsSection() {
 
       <AutonomyBlock ready={ready} />
 
-      <SettingsGroup title="Account">
-        <ProviderAccountRow />
+      <SettingsGroup title={t('settings.agents.account')}>
+        <ModelProviderRow />
       </SettingsGroup>
 
-      <SettingsGroup title="Model & performance">
+      <SettingsGroup title={t('settings.agents.modelPerformance')}>
         <PreferredModelRow ready={ready} />
         <RunOnRow />
         <BackgroundAgentsRow />
         <ToolSearchRow />
       </SettingsGroup>
 
-      <SettingsGroup title="Privacy & control">
+      <SettingsGroup title={t('settings.agents.privacyControl')}>
         <RememberPreferencesRow />
+        <MemoryProviderRow />
         <AskBeforeSendingRow />
         <ActivityHistoryRow />
       </SettingsGroup>
@@ -71,51 +86,14 @@ export function AgentsSection() {
   )
 }
 
-// ---- Account -------------------------------------------------------------------------------
-
-/** The model provider's sign-in state; "Sign in" opens the OS sign-in card (device-code flow). */
-function ProviderAccountRow() {
-  const auth = useStore($hermesAuth)
-  const target = loginTarget(auth)
-  const signedIn = Boolean(target?.loggedIn)
-  const others = auth.providers.filter(p => p.loggedIn && p.id !== target?.id)
-
-  return (
-    <SettingsRow
-      icon={<IconKey />}
-      label={target ? `${target.name}` : 'Model provider'}
-      description={
-        !auth.checked
-          ? 'Checking sign-in…'
-          : !target
-            ? 'No OAuth provider is configured; the model uses an API key.'
-            : signedIn
-              ? `Signed in${target.source ? ` (${target.source.replace(/_/g, ' ')})` : ''}.${others.length ? ` Also signed in: ${others.map(p => p.name).join(', ')}.` : ''}`
-              : 'Signed out. Hermes cannot answer until you sign in.'
-      }
-      keywords="login sign in account oauth nous portal credentials"
-    >
-      {target && (signedIn ? <Pill tone="ok" dot>Signed in</Pill> : <Pill tone="warn" dot>Signed out</Pill>)}
-      {target && !signedIn && (
-        <GlassButton size="sm" variant="primary" onClick={() => requestHermesLogin(`${target.name} is signed out.`)} aria-label={`Sign in with ${target.name}`}>
-          Sign in
-        </GlassButton>
-      )}
-      <GlassButton size="sm" variant="ghost" onClick={() => void refreshHermesAuth()} aria-label="Refresh sign-in status">
-        <IconRefresh />
-      </GlassButton>
-    </SettingsRow>
-  )
-}
-
 // ---- Autonomy ------------------------------------------------------------------------------
 
 type ApprovalMode = 'manual' | 'smart' | 'off'
 
-const AUTONOMY: { mode: ApprovalMode; label: string; description: string; icon: React.ReactNode }[] = [
-  { mode: 'manual', label: 'Ask first', description: 'Confirm each action', icon: <IconMessage /> },
-  { mode: 'smart', label: 'Balanced', description: 'Work freely. Ask before sharing.', icon: <IconScale /> },
-  { mode: 'off', label: 'Independent', description: 'Follow your saved rules', icon: <IconBolt /> }
+const AUTONOMY: { mode: ApprovalMode; label: TextKey; description: TextKey; icon: React.ReactNode }[] = [
+  { mode: 'manual', label: 'settings.agents.askFirst', description: 'settings.agents.askFirstHint', icon: <IconMessage /> },
+  { mode: 'smart', label: 'settings.agents.balanced', description: 'settings.agents.balancedHint', icon: <IconScale /> },
+  { mode: 'off', label: 'settings.agents.independent', description: 'settings.agents.independentHint', icon: <IconBolt /> }
 ]
 
 function normalizeMode(value: unknown): ApprovalMode | null {
@@ -125,6 +103,7 @@ function normalizeMode(value: unknown): ApprovalMode | null {
 }
 
 function AutonomyBlock({ ready }: { ready: boolean }) {
+  const t = useT()
   const setting = useBackendData(() => gatewayRequest('config.get', { key: 'approvals.mode' }), [], { enabled: ready })
   const [override, setOverride] = useState<{ base: unknown; mode: ApprovalMode } | null>(null)
   const [pendingOff, setPendingOff] = useState(false)
@@ -139,10 +118,11 @@ function AutonomyBlock({ ready }: { ready: boolean }) {
     try {
       await gatewayRequest('config.set', { key: 'approvals.mode', value: mode })
       markSaved()
-      notify({ title: 'Autonomy updated', body: AUTONOMY.find(item => item.mode === mode)?.label, level: 'success' })
+      const chosen = AUTONOMY.find(item => item.mode === mode)
+      notify({ title: t('settings.agents.autonomyUpdated'), body: chosen && t(chosen.label), level: 'success' })
     } catch (error) {
       setOverride(null)
-      notify({ title: 'Could not change autonomy', body: errorText(error), level: 'error' })
+      notify({ title: t('settings.agents.autonomyFailed'), body: errorText(error), level: 'error' })
     } finally {
       setBusy(false)
       setting.reload()
@@ -166,100 +146,114 @@ function AutonomyBlock({ ready }: { ready: boolean }) {
   }
 
   return (
-    <SettingsBlock title="Autonomy" label="Autonomy" description="Ask first. Balanced. Independent. How much Hermes checks in before acting." keywords="approvals mode manual smart off yolo confirm">
-      <div className="flex gap-3" aria-label="Autonomy">
+    <SettingsBlock title={t('settings.agents.autonomy')} label={t('settings.agents.autonomy')} description={t('settings.agents.autonomyHint')} keywords="autonomy approvals mode manual smart off yolo confirm">
+      <div className="flex min-w-0 gap-3" aria-label={t('settings.agents.autonomy')}>
         {AUTONOMY.map(item => (
-          <RadioCard key={item.mode} icon={item.icon} label={item.label} description={item.description} selected={pendingOff ? item.mode === 'off' : current === item.mode} onSelect={() => choose(item.mode)} disabled={!ready || busy} />
+          <RadioCard key={item.mode} icon={item.icon} label={t(item.label)} description={t(item.description)} selected={pendingOff ? item.mode === 'off' : current === item.mode} onSelect={() => choose(item.mode)} disabled={!ready || busy} />
         ))}
       </div>
       {pendingOff && (
         <GlassCard className="flex items-center gap-3 px-3.5 py-2.5">
-          <InlineNote tone="warn" className="flex-1">
-            Hermes will run gated actions without asking.
+          <InlineNote tone="warn" className="min-w-0 flex-1">
+            {t('settings.agents.independentWarning')}
           </InlineNote>
           <GlassButton size="sm" variant="ghost" onClick={() => setPendingOff(false)}>
-            Cancel
+            {t('settings.cancel')}
           </GlassButton>
-          <GlassButton size="sm" variant="primary" onClick={() => void apply('off')} aria-label="Confirm independent mode">
-            Confirm
+          <GlassButton size="sm" variant="primary" onClick={() => void apply('off')} aria-label={t('settings.agents.confirmIndependent')}>
+            {t('settings.agents.confirm')}
           </GlassButton>
         </GlassCard>
       )}
-      {setting.error && <InlineNote tone="danger">Could not read the approval mode: {setting.error}</InlineNote>}
+      {setting.error && <InlineNote tone="danger">{t('settings.agents.autonomyUnreadable', { error: errorText(setting.error) })}</InlineNote>}
     </SettingsBlock>
   )
 }
 
 // ---- Preferred model -----------------------------------------------------------------------
 
-function shortModel(model: string | undefined | null): string {
+function shortModel(model: string | undefined | null, automatic: string): string {
   if (!model) {
-    return 'Automatic'
+    return automatic
   }
 
   return model.includes('/') ? model.slice(model.indexOf('/') + 1) : model
 }
 
 function PreferredModelRow({ ready }: { ready: boolean }) {
+  const t = useT()
   const chat = useStore($activeChat)
-  const options = useBackendData(() => gatewayRequest('model.options', { include_unconfigured: false }), [], { enabled: ready })
+  const changes = useStore($providerChanges)
+  const options = useBackendData(() => gatewayRequest('model.options', { include_unconfigured: false }), [changes], { enabled: ready })
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [pending, setPending] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<Extract<ModelChange, { ok: false }> | null>(null)
   const ref = useDismiss(open, () => setOpen(false))
 
   const current = options.data?.model ?? chat?.info.model
   const provider = options.data?.provider ?? chat?.info.provider
+  // Hermes names a custom endpoint `custom:<name>` where its row has the bare name.
+  const nameOf = (slug: string) => options.data?.providers.find(p => p.slug === slug || p.aliases?.includes(slug))?.name ?? slug
+  const providerLabel = provider && nameOf(provider)
   const providers = useMemo(() => {
     const q = filter.trim().toLowerCase()
 
     return (options.data?.providers ?? [])
-      .filter(p => (p.models?.length ?? 0) > 0)
+      .filter(p => p.authenticated !== false && (p.models?.length ?? 0) > 0)
       .map(p => ({ ...p, models: (p.models ?? []).filter(model => !q || model.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)) }))
       .filter(p => p.models.length > 0)
   }, [options.data, filter])
 
-  const setModel = async (providerSlug: string, model: string) => {
-    if (!chat) {
-      notify({ title: 'Open a session first', body: 'Model changes apply to the active session and become the default for new ones.', level: 'info' })
-
-      return
-    }
-
+  const setModel = async (providerSlug: string, model: string, confirmed = false) => {
     setPending(`${providerSlug}:${model}`)
+    setConfirm(null)
 
     try {
-      await gatewayRequest('slash.exec', { session_id: chat.sessionId, command: `/model ${providerSlug}:${model}` })
-      markSaved()
-      notify({ title: 'Model changed', body: `${providerSlug} · ${model}`, level: 'success' })
+      const change = await setHermesModel(providerSlug, model, confirmed)
       setOpen(false)
-      options.reload()
+
+      if (!change.ok) {
+        setConfirm(change)
+
+        return
+      }
+
+      markSaved()
+      const name = nameOf(change.provider)
+      notify({ title: t('settings.agents.modelChanged'), body: t(chat ? 'settings.agents.modelChangedChat' : 'settings.agents.modelChangedNew', { provider: name, model: change.model }), level: 'success' })
     } catch (error) {
-      notify({ title: 'Could not change model', body: errorText(error), level: 'error' })
+      notify({ title: t('settings.agents.modelFailed'), body: errorText(error), level: 'error' })
     } finally {
       setPending(null)
     }
   }
 
   return (
-    <SettingsRow icon={<IconCpu />} label="Preferred model" description="Choose the model Hermes uses for most tasks." keywords="llm provider">
+    <SettingsRow
+      icon={<IconCpu />}
+      label={t('settings.agents.preferredModel')}
+      description={t('settings.agents.preferredModelHint')}
+      keywords="llm provider"
+      below={confirm ? <ModelConfirm message={confirm.confirm} busy={Boolean(pending)} onCancel={() => setConfirm(null)} onConfirm={() => void setModel(confirm.provider, confirm.model, true)} /> : undefined}
+    >
       <div ref={ref} className="relative">
-        <Dropdown label={<span className="max-w-[240px] truncate">{provider ? `${provider} · ${shortModel(current)}` : `Hermes · ${shortModel(current)}`}</span>} onClick={() => ready && setOpen(o => !o)} className={cn(!ready && 'opacity-50')} />
+        <Dropdown label={<span className="max-w-[240px] truncate">{`${providerLabel || t('app.hermes')} · ${shortModel(current, t('settings.agents.automatic'))}`}</span>} onClick={() => ready && setOpen(o => !o)} className={cn(!ready && 'opacity-50')} />
         {open && (
-          <div className="float animate-pop absolute top-[calc(100%+6px)] right-0 z-30 flex w-[380px] flex-col rounded-lg" role="dialog" aria-label="Choose model">
+          <div className="float animate-pop absolute top-[calc(100%+6px)] right-0 z-30 flex w-[380px] flex-col rounded-lg" role="dialog" aria-label={t('settings.agents.chooseModel')}>
             <label className="glass-input m-2 flex h-8 items-center gap-2 rounded-lg px-2.5">
               <IconSearch size={14} className="text-fg-3" />
-              <input autoFocus value={filter} onChange={event => setFilter(event.target.value)} placeholder="Filter models" className="min-w-0 flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-fg-4" />
+              <input autoFocus value={filter} onChange={event => setFilter(event.target.value)} placeholder={t('settings.agents.filterModels')} aria-label={t('settings.agents.filterModels')} className="min-w-0 flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-fg-4" />
             </label>
             <div className="flex max-h-[360px] flex-col gap-3 overflow-y-auto px-2 pb-2">
-              {options.loading && providers.length === 0 && <div className="px-1 py-2 text-[12px] text-fg-4">Loading models…</div>}
-              {options.error && <div className="px-1 py-2 text-[12px] text-danger">{options.error}</div>}
-              {!options.loading && !options.error && providers.length === 0 && <div className="px-1 py-2 text-[12px] text-fg-4">No configured models match.</div>}
+              {options.loading && providers.length === 0 && <div className="px-1 py-2 text-[12px] text-fg-4">{t('settings.agents.loadingModels')}</div>}
+              {options.error && <div className="px-1 py-2 text-[12px] text-danger">{errorText(options.error)}</div>}
+              {!options.loading && !options.error && providers.length === 0 && <div className="px-1 py-2 text-[12px] text-fg-4">{t('settings.agents.noModels')}</div>}
               {providers.map(p => (
                 <section key={p.slug}>
                   <div className="mb-1 flex items-center gap-2 px-1">
                     <span className="text-[11.5px] font-medium text-fg-2">{p.name}</span>
-                    {p.is_current && <Pill tone="accent">current</Pill>}
+                    {p.is_current && <Pill tone="accent">{t('settings.agents.current')}</Pill>}
                   </div>
                   <div className="flex flex-col">
                     {p.models.slice(0, 40).map(model => {
@@ -269,16 +263,15 @@ function PreferredModelRow({ ready }: { ready: boolean }) {
                       return (
                         <button key={model} type="button" disabled={Boolean(pending)} onClick={() => void setModel(p.slug, model)} className={cn('flex items-center justify-between rounded-md px-2 py-1.5 text-left font-mono text-[12px] transition-colors disabled:opacity-60', active ? 'bg-accent-soft text-fg' : 'text-fg-2 hover:bg-white/8 hover:text-fg', busy && 'opacity-60')}>
                           <span className="truncate">{model}</span>
-                          {active && <span className="ml-2 text-[10.5px] text-accent-strong">active</span>}
+                          {active && <span className="ml-2 text-[10.5px] text-accent-strong">{t('settings.agents.active')}</span>}
                         </button>
                       )
                     })}
-                    {(p.total_models ?? 0) > 40 && <span className="px-2 py-1 text-[11px] text-fg-4">+{(p.total_models ?? 0) - 40} more via /model</span>}
+                    {(p.total_models ?? 0) > 40 && <span className="px-2 py-1 text-[11px] text-fg-4">{t('settings.agents.moreModels', { count: (p.total_models ?? 0) - 40 })}</span>}
                   </div>
                 </section>
               ))}
             </div>
-            {!chat && <div className="border-t border-line px-3 py-2 text-[11.5px] text-fg-4">Open a session to change the model.</div>}
           </div>
         )}
       </div>
@@ -302,9 +295,22 @@ interface TerminalBackendsPayload {
   backends: TerminalBackendRow[]
 }
 
-const backendLabel = (row: TerminalBackendRow | undefined, name: string) => (name === 'local' ? 'This device' : (row?.label ?? name))
+const backendLabel = (row: TerminalBackendRow | undefined, name: string) => (name === 'local' ? t('settings.agents.thisDevice') : (row?.label ?? name))
+
+const BACKEND_STATUS: Partial<Record<string, TextKey>> = {
+  ready: 'settings.agents.status.ready',
+  needs_setup: 'settings.agents.status.needsSetup',
+  unavailable: 'settings.agents.status.unavailable'
+}
+
+const backendStatus = (status: string) => {
+  const key = BACKEND_STATUS[status]
+
+  return key ? t(key) : status.replace('_', ' ')
+}
 
 function RunOnRow() {
+  const t = useT()
   const backends = useBackendData(() => rest.get<TerminalBackendsPayload>('/api/tools/terminal/backends'))
   const [override, setOverride] = useState<{ base: unknown; active: string } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -323,10 +329,10 @@ function RunOnRow() {
     try {
       await rest.put('/api/tools/terminal/backend', { backend: name })
       markSaved()
-      notify({ title: 'Execution backend changed', body: `${backendLabel(rows.find(row => row.name === name), name)}. New sessions use it.`, level: 'success' })
+      notify({ title: t('settings.agents.backendChanged'), body: t('settings.agents.newSessionsUseIt', { name: backendLabel(rows.find(row => row.name === name), name) }), level: 'success' })
     } catch (error) {
       setOverride(null)
-      notify({ title: 'Could not change backend', body: errorText(error), level: 'error' })
+      notify({ title: t('settings.agents.backendFailed'), body: errorText(error), level: 'error' })
     } finally {
       setBusy(false)
       backends.reload()
@@ -336,9 +342,9 @@ function RunOnRow() {
   const statusTone = (status: string | undefined): PillTone => (status === 'ready' ? 'ok' : status === 'needs_setup' ? 'warn' : 'muted')
 
   return (
-    <SettingsRow icon={<IconCloud />} label="Run on" description={activeRow?.detail && activeRow.status !== 'ready' ? activeRow.detail : 'Where agents execute your tasks.'} keywords="terminal backend execution docker ssh modal cloud local">
+    <SettingsRow icon={<IconCloud />} label={t('settings.agents.runOn')} description={activeRow?.detail && activeRow.status !== 'ready' ? activeRow.detail : t('settings.agents.runOnHint')} keywords="terminal backend execution docker ssh modal cloud local">
       <MenuDropdown
-        ariaLabel="Execution backend"
+        ariaLabel={t('settings.agents.executionBackend')}
         label={backendLabel(activeRow, active)}
         value={active}
         disabled={busy || rows.length === 0}
@@ -347,7 +353,7 @@ function RunOnRow() {
           id: row.name,
           label: backendLabel(row, row.name),
           description: row.description,
-          trailing: row.status ? <Pill tone={statusTone(row.status)}>{row.status.replace('_', ' ')}</Pill> : undefined
+          trailing: row.status ? <Pill tone={statusTone(row.status)}>{backendStatus(row.status)}</Pill> : undefined
         }))}
         onSelect={name => void select(name)}
       />
@@ -363,6 +369,7 @@ interface HermesConfigPayload {
 }
 
 function BackgroundAgentsRow() {
+  const t = useT()
   const config = useBackendData(() => rest.get<HermesConfigPayload>('/api/config'))
   const [override, setOverride] = useState<{ base: unknown; value: number } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -378,7 +385,7 @@ function BackgroundAgentsRow() {
       markSaved()
     } catch (error) {
       setOverride(null)
-      notify({ title: 'Could not change background agents', body: errorText(error), level: 'error' })
+      notify({ title: t('settings.agents.backgroundAgentsFailed'), body: errorText(error), level: 'error' })
     } finally {
       setBusy(false)
       config.reload()
@@ -386,8 +393,8 @@ function BackgroundAgentsRow() {
   }
 
   return (
-    <SettingsRow icon={<IconUsers />} label="Background agents" description="Number of concurrent background agents." keywords="delegation subagents parallel concurrency">
-      <Stepper value={value} onChange={next => void change(next)} min={1} max={32} disabled={busy || value === null} label="background agents" />
+    <SettingsRow icon={<IconUsers />} label={t('settings.agents.backgroundAgents')} description={t('settings.agents.backgroundAgentsHint')} keywords="delegation subagents parallel concurrency">
+      <Stepper value={value} onChange={next => void change(next)} min={1} max={32} disabled={busy || value === null} label={t('settings.agents.backgroundAgentsCount')} />
     </SettingsRow>
   )
 }
@@ -402,6 +409,7 @@ interface ToolsetRow {
 }
 
 function RememberPreferencesRow() {
+  const t = useT()
   const toolsets = useBackendData(() => rest.get<ToolsetRow[]>('/api/tools/toolsets'))
   const [override, setOverride] = useState<{ base: unknown; enabled: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -415,10 +423,10 @@ function RememberPreferencesRow() {
     try {
       await rest.put('/api/tools/toolsets/memory', { enabled: next })
       markSaved()
-      notify({ title: next ? 'Memory on' : 'Memory paused', body: next ? 'Hermes can save memories again.' : 'Hermes stops saving to its own memory, in its CLI too, but still uses it.', level: 'success' })
+      notify({ title: t(next ? 'overview.memory.on' : 'overview.memory.paused'), body: t(next ? 'settings.agents.memoryOnBody' : 'settings.agents.memoryPausedBody'), level: 'success' })
     } catch (error) {
       setOverride(null)
-      notify({ title: 'Could not change memory', body: errorText(error), level: 'error' })
+      notify({ title: t('settings.agents.memoryFailed'), body: errorText(error), level: 'error' })
     } finally {
       setBusy(false)
       toolsets.reload()
@@ -426,8 +434,8 @@ function RememberPreferencesRow() {
   }
 
   return (
-    <SettingsRow icon={<IconFileText />} label="Remember preferences" description="Let Hermes remember your settings and learn from your choices." keywords="memory toolset learn">
-      <Toggle checked={enabled} onChange={next => void toggle(next)} label="Remember preferences" disabled={busy || !row} />
+    <SettingsRow icon={<IconFileText />} label={t('settings.agents.rememberPreferences')} description={t('settings.agents.rememberPreferencesHint')} keywords="memory toolset learn">
+      <Toggle checked={enabled} onChange={next => void toggle(next)} label={t('settings.agents.rememberPreferences')} disabled={busy || !row} />
     </SettingsRow>
   )
 }
@@ -435,6 +443,7 @@ function RememberPreferencesRow() {
 // ---- Ask before sending messages (bridge `act` tier) ---------------------------------------
 
 function AskBeforeSendingRow() {
+  const t = useT()
   const policy = useLocalData(() => window.heraldOS.bridge.readPolicy())
   const [override, setOverride] = useState<{ base: unknown; confirm: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -454,7 +463,7 @@ function AskBeforeSendingRow() {
       markSaved()
     } catch (error) {
       setOverride(null)
-      notify({ title: 'Could not update permissions', body: errorText(error), level: 'error' })
+      notify({ title: t('settings.agents.permissionsFailed'), body: errorText(error), level: 'error' })
     } finally {
       setBusy(false)
       policy.reload()
@@ -462,8 +471,8 @@ function AskBeforeSendingRow() {
   }
 
   return (
-    <SettingsRow icon={<IconLock />} label="Ask before sending messages" description="Get a confirmation before Hermes sends messages on your behalf. Sets the system bridge's “act” tier to confirm." keywords="permissions policy act tier bridge">
-      <Toggle checked={confirm} onChange={next => void toggle(next)} label="Ask before sending messages" disabled={busy || !policy.data} />
+    <SettingsRow icon={<IconLock />} label={t('settings.agents.askBeforeSending')} description={t('settings.agents.askBeforeSendingHint')} keywords="permissions policy act tier bridge">
+      <Toggle checked={confirm} onChange={next => void toggle(next)} label={t('settings.agents.askBeforeSending')} disabled={busy || !policy.data} />
     </SettingsRow>
   )
 }
@@ -471,6 +480,7 @@ function AskBeforeSendingRow() {
 // ---- Activity history (bridge audit) --------------------------------------------------------
 
 function ActivityHistoryRow() {
+  const t = useT()
   const [open, setOpen] = useState(false)
   // Only read the log while the panel is open; `open` in deps refetches on every expand.
   const audit = useLocalData(() => (open ? window.heraldOS.bridge.readAudit(200) : Promise.resolve<AuditEntry[]>([])), [open])
@@ -478,21 +488,21 @@ function ActivityHistoryRow() {
   return (
     <SettingsRow
       icon={<IconHistory />}
-      label="Activity history"
-      description="View and manage your past agent activity."
+      label={t('settings.agents.activityHistory')}
+      description={t('settings.agents.activityHistoryHint')}
       keywords="audit log bridge actions"
       below={
         open ? (
           <div className="animate-rise flex flex-col gap-2">
             <div className="flex items-center justify-between text-[12px] text-fg-3">
-              <span>Every action the system bridge took or refused, newest first.</span>
+              <span>{t('settings.agents.activityHistoryIntro')}</span>
               <GlassButton size="sm" variant="ghost" onClick={audit.reload}>
-                Refresh
+                {t('overview.refresh')}
               </GlassButton>
             </div>
             <div className="flex max-h-[320px] flex-col overflow-y-auto rounded-lg border border-line bg-black/20">
-              {audit.loading && !audit.data?.length && <div className="p-3 text-[12px] text-fg-4">Loading…</div>}
-              {!audit.loading && (audit.data?.length ?? 0) === 0 && <div className="p-3 text-[12px] text-fg-4">No bridge activity yet.</div>}
+              {audit.loading && !audit.data?.length && <div className="p-3 text-[12px] text-fg-4">{t('settings.agents.loading')}</div>}
+              {!audit.loading && (audit.data?.length ?? 0) === 0 && <div className="p-3 text-[12px] text-fg-4">{t('settings.agents.noActivity')}</div>}
               {(audit.data ?? []).map((entry, index) => (
                 <AuditRow key={`${entry.ts}-${index}`} entry={entry} />
               ))}
@@ -501,7 +511,7 @@ function ActivityHistoryRow() {
         ) : undefined
       }
     >
-      <LinkAction onClick={() => setOpen(o => !o)}>{open ? 'Hide history' : 'View history'}</LinkAction>
+      <LinkAction onClick={() => setOpen(o => !o)}>{t(open ? 'settings.agents.hideHistory' : 'settings.agents.viewHistory')}</LinkAction>
     </SettingsRow>
   )
 }

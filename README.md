@@ -39,21 +39,24 @@ Pick the way that matches your machine:
 
 | Your machine | What to install |
 | --- | --- |
-| A Mac with Apple Silicon | [Herald OS for macOS](#macos) |
-| An Intel Mac | [Herald OS Linux in a virtual machine, or the Mac app from source](#on-an-intel-mac) |
+| A Mac, Apple Silicon or Intel | [Herald OS for macOS](#macos) |
 | A PC you can give to Herald OS | [The Herald OS Linux installer](#herald-os-linux-on-a-pc) |
 | Arch Linux | [The Arch package](#arch-linux) |
 | Omarchy | [The Arch package, then one command](#omarchy) |
 | Another Linux | [The tarball](#another-linux) |
-| An Apple Silicon Mac, to try the whole OS | [The virtual machine](#the-whole-os-in-a-virtual-machine) |
+| An Apple Silicon Mac, to try the whole OS | [The virtual machine in UTM](#on-a-mac-with-utm) |
+| An Intel Mac, to try the whole OS | [The x86_64 virtual machine](#on-linux-or-an-intel-mac) |
+| A Windows 11 PC, to try the whole OS | [The virtual machine in Hyper-V](#on-windows-with-hyper-v) |
 
 Hermes needs a model provider whichever you pick: a [Nous Portal](https://portal.nousresearch.com)
 account, or an API key for a provider Hermes supports (OpenRouter, OpenAI, Anthropic, a local model,
-and others). Herald OS shows a sign-in card the first time Hermes needs one.
+and others). Herald OS shows a sign-in card the first time Hermes needs one, and Settings > Hermes &
+agents > Model provider switches to another provider or takes its API key, a custom endpoint's
+included.
 
 ### macOS
 
-You need macOS 13 (Ventura) or later on Apple Silicon.
+You need macOS 13 (Ventura) or later, on Apple Silicon or Intel ([On an Intel Mac](#on-an-intel-mac)).
 
 **1. Install Hermes Agent** and choose a model, if you don't have it yet:
 
@@ -63,9 +66,11 @@ source ~/.zshrc
 hermes setup
 ```
 
-**2. Install Herald OS.** Download `HeraldOS-<version>-mac-arm64.dmg` from the
+**2. Install Herald OS.** Download `HeraldOS-<version>-mac-arm64.dmg` (Apple Silicon) or
+`HeraldOS-<version>-mac-x64.dmg` (Intel) from the
 [releases page](https://github.com/iamlukethedev/Herald-OS/releases), open it and drag Herald OS to
-Applications.
+Applications. Apple menu > About This Mac says which you have: "Chip: Apple M…" is Apple Silicon,
+"Processor: … Intel …" is Intel.
 
 **3. Let it open.** This build is not notarized by Apple yet, so macOS stops it the first time.
 Run this once, then open Herald OS from Applications:
@@ -74,6 +79,10 @@ Run this once, then open Herald OS from Applications:
 xattr -dr com.apple.quarantine "/Applications/Herald OS.app"
 ```
 
+Or, without Terminal: open Herald OS once and close the warning, then go to System Settings >
+Privacy & Security, scroll to Security, click Open Anyway next to "Herald OS was blocked", and
+confirm with your password. Since macOS Sequoia, right-click > Open no longer skips the warning.
+
 Herald OS takes over the screen: `Cmd+Ctrl+F` leaves or re-enters fullscreen and `Cmd+Q` quits. On
 its first start it adds its system tools to Hermes (`~/.hermes/plugins/herald-os-bridge`). macOS asks
 for each of these the first time a feature needs it:
@@ -81,11 +90,18 @@ for each of these the first time a feature needs it:
 - **Microphone**: talking to Hermes, dictation, and screen recordings with sound.
 - **Camera**: the camera bubble on a screen recording, when you turn it on.
 - **Screen Recording**: asking Hermes about the screen, copying text or a QR code from it,
-  screenshots and screen recordings.
+  screenshots and screen recordings. Without it, Herald OS captures nothing and says where to turn
+  it on (System Settings > Privacy & Security > Screen & System Audio Recording); reopen Herald OS
+  after switching it on.
 - **Accessibility and Automation**: typing an emoji or dictation into another app (through System
   Events), and Hermes listing or quitting apps, locking the screen, switching dark mode and moving
-  files to the Trash (through Finder).
+  files to the Trash (through Finder). The first time you type an emoji or dictation into another
+  app, Herald OS explains these two before macOS asks; until both are allowed, the text stays on the
+  clipboard and Herald OS says which one is missing.
 - **Calendars**: today's events on the Overview.
+- **Local Network**: Hermes reaching a model server or another device on your network, such as a
+  custom endpoint at a `192.168…` address. Hermes runs inside Herald OS, so this is Herald OS's to
+  allow.
 - **Files and Folders**: your Desktop, Documents and Downloads, for recent files on the Overview,
   the Files page and Hermes's file tools.
 - **Notifications**: alerts while you are in another app, in a code-signed build (this release is
@@ -93,16 +109,16 @@ for each of these the first time a feature needs it:
 
 #### On an Intel Mac
 
-There is no Intel build of the Mac app (`npm run dist:mac` builds for Apple Silicon only), and the
-ready-made virtual machine (`linux/vm/try.sh`) needs Apple Silicon too. Instead:
+Download `HeraldOS-<version>-mac-x64.dmg` and follow the steps above. The Intel build is the same
+app built for x86_64, with node-pty's Intel binaries for the Terminal, but it is new and has not
+been tried on an Intel Mac yet: please [open an issue](https://github.com/iamlukethedev/Herald-OS/issues)
+if something does not work.
 
-- **Herald OS Linux in a virtual machine.** Install the x86_64 installer ISO from
-  [Herald OS Linux on a PC](#herald-os-linux-on-a-pc) in a VM that boots with UEFI, such as
-  [UTM](https://mac.getutm.app). CI installs it in QEMU with UEFI, 4 cores, 6 GB of memory and a
-  40 GB disk ([installer-test.yml](.github/workflows/installer-test.yml)).
-- **The Mac app from source** on macOS 13 or later, as in
-  [Herald OS on macOS from source](#herald-os-on-macos-from-source). It is untested on Intel, though
-  node-pty, its native terminal module, ships Intel binaries.
+To try the whole OS instead, open the ready-made x86_64 disk in [UTM](https://mac.getutm.app), as in
+[On Linux or an Intel Mac](#on-linux-or-an-intel-mac), or install the x86_64 installer ISO from
+[Herald OS Linux on a PC](#herald-os-linux-on-a-pc) in a VM that boots with UEFI. CI installs it in
+QEMU with UEFI, 4 cores, 6 GB of memory and a 40 GB disk
+([installer-test.yml](.github/workflows/installer-test.yml)).
 
 ### Herald OS Linux on a PC
 
@@ -115,8 +131,9 @@ Herald.
    them. On macOS or Linux:
 
    ```bash
+   shasum -a 256 -c herald-os-<version>-x86_64.iso.sha256sums   # each part; sha256sum -c on Linux
    cat herald-os-<version>-x86_64.iso.part* > herald-os-<version>-x86_64.iso
-   shasum -a 256 -c herald-os-<version>-x86_64.iso.sha256    # sha256sum -c on Linux
+   shasum -a 256 -c herald-os-<version>-x86_64.iso.sha256         # the joined file
    ```
 
    On Windows: `copy /b herald-os-<version>-x86_64.iso.part0 + herald-os-<version>-x86_64.iso.part1 herald-os-<version>-x86_64.iso`.
@@ -129,8 +146,10 @@ Herald.
 
 Updates come as a whole new version of the system: `herald-os update` installs one, and
 `herald-os rollback` goes back to the one before. Already on Fedora Silverblue or another bootc
-system? It can switch to the Herald OS image in place, which replaces the system you run and adds an
-account that signs in without a password: try it on a spare machine or in a virtual machine.
+system? It can switch to the Herald OS image in place, which replaces the system you run: try it on
+a spare machine or in a virtual machine. Afterwards a login screen asks who signs in, and your own
+account and its password keep working. Herald OS also adds a `hermes` account, which stays locked,
+and is not an administrator, until you give it a password (`sudo passwd hermes`).
 [docs/LINUX.md](docs/LINUX.md#switching-a-bootc-system-to-herald-os) has the steps, what changes and
 how to go back.
 
@@ -193,8 +212,81 @@ colour scheme and GTK theme. On a desktop you already use, try it from a second 
 
 ### The whole OS in a virtual machine
 
-On an Apple Silicon Mac, one command downloads the latest release's VM disk (about 2.7 GB) and
-boots it with Apple's virtualization, so the graphics are accelerated:
+Each release carries ready-made virtual machines of Herald OS Linux, so you can try the whole
+operating system without installing it. The first start sets itself up in a few minutes, Hermes
+Agent included, then Herald OS asks for your name and a password. Give the virtual machine 4 cores,
+6 GB of memory and 40 GB of disk space. The UTM bundle and the Hyper-V disk come with releases built
+after 0.1.0-alpha.4; earlier releases have only the Apple Silicon disk for `try.sh`. The manual's
+[Trying it in a virtual machine](docs/manual/virtual-machine.md) has the same steps, with the
+system key and scaling inside a virtual machine.
+
+GitHub takes release files of up to 2 GB, so a bigger one comes in parts. The zips are split as
+`.001`, `.002` and so on: open the `.001` with [7-Zip](https://www.7-zip.org) on Windows or
+[Keka](https://www.keka.io) on a Mac, which read the parts as one archive. Every file has a
+`.sha256` beside it for the whole file, and a split one also has a `.sha256sums` with a line per
+part. From a terminal, check the parts, join them and check the result (the `.vhdx.zip` here; the
+`.utm.zip` is the same, and the `qcow2.zst` parts are `.part0`, `.part1`):
+
+```bash
+shasum -a 256 -c herald-os-<version>-x86_64.vhdx.zip.sha256sums   # sha256sum -c on Linux
+cat herald-os-<version>-x86_64.vhdx.zip.[0-9][0-9][0-9] > herald-os-<version>-x86_64.vhdx.zip
+shasum -a 256 -c herald-os-<version>-x86_64.vhdx.zip.sha256
+```
+
+In Windows' Command Prompt:
+
+```bat
+copy /b herald-os-<version>-x86_64.vhdx.zip.001 + herald-os-<version>-x86_64.vhdx.zip.002 herald-os-<version>-x86_64.vhdx.zip
+certutil -hashfile herald-os-<version>-x86_64.vhdx.zip SHA256
+```
+
+Then compare the hash with the one in the `.sha256`. With more parts, add a `+` and the next part
+for each.
+
+#### On a Mac with UTM
+
+For a Mac with Apple Silicon, without Homebrew or a terminal:
+
+1. Install [UTM](https://mac.getutm.app), a free app that runs virtual machines.
+2. Download `herald-os-<version>-aarch64.utm.zip` from the
+   [releases page](https://github.com/iamlukethedev/Herald-OS/releases) and open it. Finder unpacks
+   `Herald OS.utm`.
+3. Double-click `Herald OS.utm`. UTM adds it to its list; press the play button.
+
+The bundle runs on Apple's hypervisor with GPU-accelerated graphics, and asks UTM for sound, a
+shared clipboard and a screen that follows the window's size. How much of that Herald OS Linux uses
+inside UTM is still being tested ([#67](https://github.com/iamlukethedev/Herald-OS/issues/67)).
+UTM's settings for the machine change its cores and memory.
+
+#### On Windows with Hyper-V
+
+Hyper-V comes with Windows 11 Pro, Enterprise and Education (not Home):
+
+1. Turn it on: Start, type "Turn Windows features on or off", tick **Hyper-V** and restart.
+2. Download `herald-os-<version>-x86_64.vhdx.zip` from the
+   [releases page](https://github.com/iamlukethedev/Herald-OS/releases) and unpack it to a folder
+   with 40 GB free; the disk grows up to that as you use it. To check it, 7-Zip's right-click menu
+   has **CRC SHA > SHA-256**; compare with the `.sha256`.
+3. In Hyper-V Manager, **New > Virtual Machine**: generation 2, 6144 MB of memory, the **Default
+   Switch** network, and **Use an existing virtual hard disk** with the `.vhdx`.
+4. Before the first start, open the machine's **Settings**: under **Security** set the Secure Boot
+   template to **Microsoft UEFI Certificate Authority** (the Windows one refuses Linux), and under
+   **Processor** give it 4 virtual processors.
+5. **Connect**, then **Start**.
+
+Hyper-V gives Linux no 3D acceleration, so the processor draws the screen, and there is no sound or
+shared clipboard there yet.
+
+#### On Linux or an Intel Mac
+
+`herald-os-<version>-x86_64.qcow2.zst` (and `aarch64` for ARM machines) is the same disk for QEMU,
+virt-manager, GNOME Boxes or UTM on an Intel Mac. Unpack it with `zstd -d`, then create a machine
+that boots with UEFI from it as an existing disk.
+
+#### From the terminal on an Apple Silicon Mac
+
+One command downloads the latest release's disk (about 2.7 GB) and boots it with Apple's
+Virtualization framework through vfkit:
 
 ```bash
 brew install qemu zstd
@@ -202,10 +294,7 @@ git clone https://github.com/iamlukethedev/Herald-OS.git && cd Herald-OS
 bash linux/vm/try.sh
 ```
 
-The first start sets itself up in a few minutes, Hermes Agent included. The disk is also on the
-releases page in two parts, `herald-os-<version>-aarch64.qcow2.zst.part0` and `.part1`: join them
-with `cat`, unpack with `zstd -d`, and it imports into [UTM](https://mac.getutm.app). To build the VM
-from your checkout instead and work on Herald OS Linux, see
+To build the VM from your checkout instead and work on Herald OS Linux, see
 [Building from source](#herald-os-linux-in-a-virtual-machine).
 
 ## How Herald OS fits together
@@ -253,12 +342,21 @@ abilities as a regular Hermes plugin, `herald-os-bridge`.
 
 - **Hermes at the centre.** Overview, Hermes, Missions, Memory, Files, Automations, Connections and
   Settings, plus a Terminal, a System monitor, and floating chat windows.
+- **Your other bots.** Each Hermes profile is a bot with its own memory, skills and model, shown
+  with the name and picture Hermes Desktop's Bot Mode gave it. Start a conversation with any of
+  them from the Hermes page or the Overview, or say "talk to Alfred"; each bot's conversations stay
+  in its own session list, and new conversations keep the bot chosen last. See
+  [the manual](docs/manual/README.md#talking-to-your-other-bots).
 - **Pick up where you left off.** When you open Herald OS or come back after a break, Hermes looks
   at your recent documents, project folders (with their git state), conversations and today's
   calendar, and puts up to three threads of work on the Overview. Continue reopens a thread's
   conversation, folder and files; its suggested next step starts only when you click it.
 - **A command bar** for every action in the OS: open pages and apps, add memories, run automations,
   start missions.
+- **Your language**: English, Brazilian Portuguese (Português (Brasil)) or Simplified Chinese (简体中文), following the system's language
+  unless you pick one in Settings > General. The menus, menu bar, Overview, command bar and Settings'
+  main pages are translated so far, and more follows; see [docs/TRANSLATING.md](docs/TRANSLATING.md)
+  to help.
 - **System tools for Hermes**: system info, processes, disk usage, file search, opening apps,
   moving and trashing files, and more, each with a permission tier, protected paths, an audit log
   and the standard Hermes approval card. See [docs/SYSTEM-BRIDGE.md](docs/SYSTEM-BRIDGE.md).
@@ -280,11 +378,23 @@ abilities as a regular Hermes plugin, `herald-os-bridge`.
   masters and a presenter view. Ask Hermes for a cover letter, a cleaner column or slides from a
   report and watch each change land as a step you can undo. Before Herald first saves over a file,
   it says what the file would lose and backs it up. See [the manual](docs/manual/office.md).
+- **Herald Calc**: a notepad where you write math the way you say it ("20% of 84.50", "5 km in
+  miles", "100 USD in BRL", "days until Dec 25", "9am Sydney in New York") and every line answers
+  as you type, in exact decimals. A classic keypad with scientific and programmer modes, graphs you
+  can pan, zoom and trace, a searchable history, and a note becomes a workbook with real formulas in
+  one click. Hermes uses the same engine for math, so its numbers are worked out, not guessed. See
+  [the manual](docs/manual/calc.md).
 - **A desktop pet**: Hermes's own petdex pet on the desktop, the same one its CLI, TUI and desktop
   app show. It acts out what Hermes is doing, holds up approvals for you to answer, takes questions
   in a chat bubble and files you drop on it, walks over to the window Hermes works in, and gets out
   of the way for full screen, presentations and screen shares. See
   [the manual](docs/manual/pet.md).
+- **The Pet Room**: a window where every conversation, mission, helper and automation Hermes is
+  working on stands as a petdex pet of its own. Pets walk to the area for the tool they use, stand
+  at the desk of the document they work on, say the step they are on, hand notes to the helpers they
+  start and get the results back, and hold up a sign when they need your OK, from what Hermes
+  reports and nothing else. A lane for Hermes at work outside Herald and the room as your
+  screensaver are there when you turn them on. See [the manual](docs/manual/room.md).
 - **Make it yours**: twelve themes (two light) that also dress Hermes's own command line, a theme
   made from any image, themes installed from git, your own fonts, and Hermes can design one from a
   description. Widgets for the menu bar, the Overview or their own window run sandboxed with only
@@ -307,8 +417,8 @@ abilities as a regular Hermes plugin, `herald-os-bridge`.
   `herald-os update`, that updates Herald OS, Hermes and Fedora, with `herald-os rollback` to undo
   it.
 
-The [manual](docs/manual/README.md) covers using all of it, with every hotkey and a page for
-people coming from macOS.
+The [manual](docs/manual/README.md) covers installing and using all of it, with every hotkey,
+pages for people coming from macOS and Windows, and help for when something goes wrong.
 
 ## Building from source
 
@@ -317,6 +427,10 @@ To work on Herald OS, or to run what is on `main`:
 - **Herald OS Linux in a virtual machine** gives you the whole operating system, built from your
   checkout. The first setup takes about half an hour, most of it downloads.
 - **Herald OS on macOS** runs from your checkout in a few minutes if you already have Node.js.
+- **Your own Herald OS image**, the bootable system the installer and the VM disks are made from,
+  builds from your checkout with Podman on Linux. [docs/BUILDING-THE-IMAGE.md](docs/BUILDING-THE-IMAGE.md)
+  covers the recipe, the build, switching a machine to your build, and adding packages, Flatpaks
+  and branding.
 
 ### Herald OS Linux in a virtual machine
 
@@ -360,7 +474,8 @@ bash linux/dev/push.sh
 
 **5. Sign Hermes in.** The first time Hermes needs a model, Herald OS shows a sign-in card with a
 short code: open the link on any device and enter the code. To use an API key or another provider
-instead, open a shell in the VM with `bash linux/dev/push.sh ssh` and run `hermes setup`.
+instead, choose it under Settings > Hermes & agents > Model provider (or run `hermes setup` in a
+shell in the VM, `bash linux/dev/push.sh ssh`).
 
 From then on, `bash linux/vm/run-qemu.sh stop` shuts the VM down and `bash linux/vm/run-qemu.sh`
 starts it again, straight into Herald OS. After you change the code on your Mac,
@@ -372,7 +487,7 @@ Retina screens, the session model and the dev loop.
 You need:
 
 - **macOS 13 (Ventura) or later on Apple Silicon.** Intel Macs are untested. Herald OS is
-  developed on macOS 26.
+  developed on macOS 26. `npm run dist:mac` builds both the Apple Silicon and the Intel app.
 - **Node.js 22.12 or later** ([nodejs.org](https://nodejs.org), or `brew install node`).
 - **Git**, and the Xcode Command Line Tools (`xcode-select --install`) for native modules.
 - **Hermes Agent 0.21.3 or later**, with a model provider set up (step 1 below).
@@ -387,8 +502,8 @@ hermes setup
 ```
 
 `hermes setup` walks you through choosing a model provider and signing in. You can change it later
-with `hermes model`, or from Herald OS under Settings. Check that Hermes works on its own before
-going further:
+with `hermes model`, or from Herald OS under Settings > Hermes & agents. Check that Hermes works on
+its own before going further:
 
 ```bash
 hermes doctor
@@ -524,7 +639,10 @@ To undo it on Linux, run `herald-os setup --undo`. On macOS, the steps are in
 npm run dist:mac
 ```
 
-This writes an Apple Silicon DMG and zip to `apps/desktop/release/`. Before installing, know that:
+This writes a DMG and zip for Apple Silicon (`-mac-arm64`) and for Intel (`-mac-x64`) to
+`apps/desktop/release/`, with the apps in `release/mac-arm64/` and `release/mac/`.
+`node apps/desktop/scripts/check-mac-builds.mjs` checks that every Mach-O file in each app is built
+for that app's architecture alone, and that the DMGs and zips carry `package.json`'s version. Before installing, know that:
 
 - **A local build is not notarized.** electron-builder signs it with a code-signing identity from
   your keychain if it finds one, and leaves it unsigned otherwise. A copy that was downloaded or sent
@@ -608,8 +726,12 @@ does not change the shell's code. Moving the pin is described in [upstream/READM
   run `hermes doctor`. If Hermes lives somewhere other than `~/.hermes/hermes-agent` and is not on
   your PATH, start with `HERALD_OS_HERMES_ROOT=/path/to/hermes-agent npm run dev`. The cause is
   usually in `~/.hermes/logs/herald-os.log`.
-- **macOS says Herald OS "is damaged" or "cannot be opened".** The build is not notarized yet: run
-  `xattr -dr com.apple.quarantine "/Applications/Herald OS.app"` and open it again.
+- **macOS says Herald OS "is damaged", "cannot be opened" or "Apple could not verify Herald OS is
+  free of malware".** The build is not notarized yet: run
+  `xattr -dr com.apple.quarantine "/Applications/Herald OS.app"` and open it again, or click Open
+  Anyway in System Settings > Privacy & Security after the first attempt. 0.1.0-alpha.4
+  shipped without a signature over the app bundle; if it still says "damaged", sign your copy ad
+  hoc with `codesign --force --deep --sign - "/Applications/Herald OS.app"`.
 - **Hermes uses shell commands instead of its system tools.** `hermes plugins list` should show
   `herald-os-bridge` as enabled; `hermes plugins enable herald-os-bridge` turns it on. From a
   checkout, re-run `npm run bootstrap`; on Linux, `herald-os setup`. Then restart Herald OS.

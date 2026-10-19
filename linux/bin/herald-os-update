@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Update Herald OS: the shell (repo + rebuild, or a newer release tarball in /opt/herald-os), one-shot
 # migrations, system packages (dnf on Fedora, pacman and the AUR helper on Arch, Omarchy's own updater
-# on Omarchy, the whole image with bootc on the Herald OS image), Flatpaks and Hermes Agent. `--check`
+# on Omarchy, the whole image with bootc on the Herald OS image, or rpm-ostree once packages are
+# layered on it), Flatpaks and Hermes Agent. `--check`
 # only reports and records whether anything is pending (the menu bar shows a dot). Channels
 # (~/.config/herald-os/channel): stable (default) or edge. A checkout tracks the repo's main branch on
 # both; a release tarball follows releases, with pre-releases on edge.
@@ -9,9 +10,14 @@
 #   herald-os-update [--check] [--migrate] [--no-system] [--no-hermes]
 #
 # `--migrate` only runs pending one-shot migrations (linux/dev/build.sh calls it after every build).
+#
+# Every step is reported in a summary at the end. The exit status is 1 when the system step or one of
+# Herald OS's own steps (shell, release, migrations, rebuild) failed; a Flatpak or Hermes Agent that
+# did not update is reported, but leaves the exit status at 0.
 set -uo pipefail
 
-REPO="${HERALD_OS_REPO:-$HOME/Herald-OS}"
+REPO="$HOME/Herald-OS"
+FORCE_REBUILD=""
 STATE="$HOME/.local/state/herald-os"
 CONFIG="$HOME/.config/herald-os"
 CHANNEL="$(cat "$CONFIG/channel" 2>/dev/null || echo stable)"
@@ -20,6 +26,17 @@ MIGRATIONS_DONE="/var/lib/herald-os/migrations"
 OSTREE_BOOTED=/run/ostree-booted
 OS_RELEASE=(/etc/os-release /usr/lib/os-release)
 IMAGE_SHELL=/usr/share/herald-os/app/resources/app.asar
+# A checkout elsewhere, where migrations record that they ran, a forced rebuild, and (for the tests)
+# other image markers. As root (sudo herald-os update) only with HERALD_OS_TESTING=1: the checkout's
+# migrations and build run as root, so an inherited environment must not choose them, nor how the
+# system is updated.
+if [[ $EUID -ne 0 || "${HERALD_OS_TESTING:-}" == 1 ]]; then
+  REPO="${HERALD_OS_REPO:-$REPO}"
+  MIGRATIONS_DONE="${HERALD_OS_MIGRATIONS_DONE:-$MIGRATIONS_DONE}"
+  FORCE_REBUILD="${HERALD_OS_FORCE_REBUILD:-}"
+  OSTREE_BOOTED="${HERALD_OS_OSTREE_BOOTED:-$OSTREE_BOOTED}"
+  IMAGE_SHELL="${HERALD_OS_IMAGE_SHELL:-$IMAGE_SHELL}"
+fi
 CHECK=0
 MIGRATE=0
 SYSTEM=1
@@ -42,6 +59,8 @@ branch_for_channel() {
   esac
 }
 
+# An ISO 8601 time; BSD date (macOS) knows -Iseconds but not -Is, and older ones neither.
+now() { date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z; }
 notify() { herald-os notify "$1" "${2:-}" >/dev/null 2>&1 || true; }
 report() { herald-os update-available "$1" "$2" >/dev/null 2>&1 || true; }
 
@@ -73,7 +92,109 @@ system_kind() {
 SYSTEM_KIND="$(system_kind)"
 AUR_HELPER="$(command -v yay || command -v paru || true)"
 
-# Pending system updates (a count; the image counts as one).
+# What the system adds to the image or takes from it with rpm-ostree: packages layered (from a repo
+# or a local RPM), modules, packages removed or replaced with rpm-ostree override, and an initramfs
+# regenerated on the machine. bootc refuses to upgrade when the booted or the staged deployment has
+# any of them ("Deployment contains local rpm-ostree modifications"), so rpm-ostree upgrades instead.
+# rpm-ostree upgrades from the deployment pending for the next boot (staged, or simply first) when
+# there is one (after `rpm-ostree install` without a restart, the booted one is still clean), so
+# that one is described:
+# e.g. "layered: htop, vim; removed: firefox". Prints nothing (and fails) when bootc can upgrade.
+local_modifications() {
+  command -v rpm-ostree >/dev/null && command -v python3 >/dev/null || return 1
+  rpm-ostree status --json 2>/dev/null | python3 -c '
+import json, sys
+
+# Each label with the keys that fill it: first what was asked for (the requested-* keys, from the
+# deployment origin), then, only when those are empty, what rpm-ostree made of it in the deployment.
+KEYS = (
+    ("layered", ("requested-packages",), ("packages",)),
+    ("local", ("requested-local-packages", "requested-local-fileoverride-packages"), ()),
+    ("modules", ("requested-modules", "requested-modules-enabled"), ()),
+    ("removed", ("requested-base-removals",), ("base-removals",)),
+    ("replaced", ("requested-base-local-replacements", "requested-base-remote-replacements"),
+     ("base-local-replacements", "base-remote-replacements")),
+    ("initramfs", ("regenerate-initramfs", "initramfs-etc"), ()),
+)
+
+def name(item):
+    # A package is a name, an object, or (from GVariant tuples) [nevra, name, ...]; a replacement
+    # is a pair of packages, the new one first.
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return str(item.get("nevra") or item.get("name") or "?")
+    if isinstance(item, list) and item:
+        return name(item[0])
+    return "?"
+
+def names(key, value):
+    if key == "regenerate-initramfs":
+        # A boolean from rpm-ostree; anything true counts, as missing a change is what breaks.
+        return ["regenerated"] if value else []
+    if key == "requested-base-remote-replacements":
+        # [[source, [package, ...]], ...]
+        return [f"{package} from {pair[0]}" for pair in value or [] if isinstance(pair, list) and len(pair) == 2
+                for package in (pair[1] if isinstance(pair[1], list) else [pair[1]])]
+    if isinstance(value, dict):
+        # base-remote-replacements: {source: [replacement, ...]}
+        return [f"{name(item)} from {source}" for source, items in value.items()
+                for item in (items if isinstance(items, list) else [items])]
+    return [name(item) for item in value] if isinstance(value, list) else []
+
+def describe(deployment):
+    found = []
+    for label, requested, derived in KEYS:
+        listed = [n for key in requested for n in names(key, deployment.get(key))]
+        listed = listed or [n for key in derived for n in names(key, deployment.get(key))]
+        if listed:
+            found.append(label + ": " + ", ".join(dict.fromkeys(listed)))
+    return "; ".join(found)
+
+try:
+    status = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+deployments = [d for d in status.get("deployments") or [] if isinstance(d, dict)]
+booted = next((d for d in deployments if d.get("booted")), None)
+if booted is None:
+    sys.exit(1)
+# rpm-ostree upgrade builds on the first deployment of the OS (the staged one when there is one),
+# and rpm-ostree status calls that one pending when it is not the booted one, staged or not.
+same_os = [d for d in deployments if d.get("osname") == booted.get("osname")]
+pending = next((d for d in same_os if d.get("staged") and not d.get("booted")), None)
+if pending is None and same_os and not same_os[0].get("booted"):
+    pending = same_os[0]
+if pending is None:
+    found = describe(booted)
+elif describe(pending):
+    found = describe(pending) + (" (staged for the next restart)" if pending.get("staged") else " (pending for the next restart)")
+elif describe(booted):
+    found = describe(booted) + " (in the running system only; the next restart drops them)"
+else:
+    found = ""
+if not found:
+    sys.exit(1)
+print(found)
+'
+}
+IMAGE_CHANGES=""
+[[ $SYSTEM_KIND == image ]] && IMAGE_CHANGES="$(local_modifications)"
+
+# Runs an update check so that it cannot hold the daily timer up: at most 120 seconds (then exit
+# 124), never waiting on input. macOS has no timeout, but Homebrew's coreutils has gtimeout; with
+# neither, the check only gets no input.
+bounded() {
+  local limit
+  limit="$(command -v timeout || command -v gtimeout || true)"
+  if [[ -n "$limit" ]]; then
+    "$limit" 120 "$@" </dev/null
+  else
+    "$@" </dev/null
+  fi
+}
+
+# Pending system updates (a count; the image counts as one, "unknown" when it cannot be told).
 count_system_updates() {
   local out rc
   case "$SYSTEM_KIND" in
@@ -94,20 +215,135 @@ count_system_updates() {
       echo $((repo + aur))
       ;;
     image)
-      command -v bootc >/dev/null && sudo -n bootc upgrade --check 2>/dev/null | grep -qi 'update available' && echo 1 || echo 0
+      # The daily check runs as the user, where `sudo -n` usually needs a password, so rpm-ostree
+      # checks first without it. That works where a polkit rule lets the user check (Fedora's Atomic
+      # desktops allow wheel); under rpm-ostree's own policy, which the image keeps, it wants an
+      # administrator's password, and with no polkit agent in the session it is refused at once.
+      # It exits 0 when there is an update and 77 when there is none; anything else tells nothing,
+      # and then the tool the update would use tries through sudo -n. When neither can tell: unknown.
+      # A check that runs out of time (124) is unknown at once: the second would only wait as long.
+      rc=1
+      command -v rpm-ostree >/dev/null && { bounded rpm-ostree upgrade --check >/dev/null 2>&1; rc=$?; }
+      if [[ $rc -ne 0 && $rc -ne 77 && $rc -ne 124 ]]; then
+        if [[ -n "$IMAGE_CHANGES" ]]; then
+          bounded sudo -n rpm-ostree upgrade --check >/dev/null 2>&1
+          rc=$?
+        elif command -v bootc >/dev/null; then
+          out="$(bounded sudo -n bootc upgrade --check 2>/dev/null)"
+          rc=$?
+          # "Update available for: ..." or "No changes in: ...".
+          if [[ $rc -eq 0 ]]; then
+            grep -qi 'update available' <<<"$out" && rc=0 || rc=77
+          fi
+        fi
+      fi
+      case $rc in
+        0) echo 1 ;;
+        77) echo 0 ;;
+        *) echo unknown ;;
+      esac
       ;;
     *) echo 0 ;;
   esac
 }
 
+# How this run gets root: it is root already (sudo herald-os update), sudo needs no password, or
+# there is a terminal where sudo can ask for one. From the menu there is no terminal, and the image
+# ships no rule that lets sudo go without a password, so there is usually no way (none).
+admin_access() {
+  if [[ $EUID -eq 0 ]]; then
+    echo root
+  elif sudo -n true 2>/dev/null; then
+    echo nopasswd
+  elif [[ -t 0 ]]; then
+    echo terminal
+  else
+    echo none
+  fi
+}
+as_root() {
+  if [[ $ADMIN == terminal ]]; then
+    have_root && sudo "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
+# What the update leaves behind on its way out, however it ends: the sudo keeper below. Any other
+# cleanup belongs here too, as bash keeps one EXIT trap.
+SUDO_KEEPER=""
+on_exit() {
+  if [[ -n "$SUDO_KEEPER" ]]; then
+    kill "$SUDO_KEEPER" 2>/dev/null || true
+  fi
+}
+trap on_exit EXIT
+
+# Whether this run can act as root, asking for the password (in a terminal) the first time only.
+# sudo then remembers it for a few minutes; a background `sudo -n -v` keeps that fresh until the
+# update ends, so a long system upgrade does not leave the steps after it asking again. The keeper
+# waits on its sleep, so that on_exit's kill ends it (and the sleep) at once, and it looks whether
+# the update still runs before each refresh.
+have_root() {
+  [[ -n "${ADMIN:-}" ]] || ADMIN="$(admin_access)"
+  case $ADMIN in
+    root | nopasswd) return 0 ;;
+    none) return 1 ;;
+  esac
+  [[ -n "${SUDO_KEPT:-}" ]] && return 0
+  # A password that does not work (three tries) means no root for the rest of the update, rather
+  # than asking again at every step.
+  if ! sudo -v; then
+    ADMIN=none
+    PASSWORD_REFUSED=1
+    return 1
+  fi
+  SUDO_KEPT=1
+  (
+    trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+    while :; do
+      sleep 50 &
+      nap=$!
+      wait "$nap"
+      kill -0 $$ 2>/dev/null && sudo -n -v || exit 0
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  SUDO_KEEPER=$!
+  return 0
+}
+NEEDS_ROOT="needs root: run sudo herald-os update"
+# How a step that needs root says it did not run: skipped for want of root, or, after sudo refused
+# the password in a terminal, refused. `not_run LABEL STEP NAMES TOOL` says it and records it in
+# the summary; NAMES are what did not run (migrations), TOOL what would have run it.
+not_run() {
+  local label="$1" name="$2" names="$3" tool="$4" what="${3:-$4}"
+  if [[ -n "${PASSWORD_REFUSED:-}" ]]; then
+    echo "==> $label: password refused"
+    step "$name" "password refused${what:+ ($what not run)}"
+  else
+    echo "==> $label: skipped (${tool:+$tool }$NEEDS_ROOT)"
+    step "$name" "skipped${names:+ $names} (${tool:+$tool }$NEEDS_ROOT)"
+  fi
+}
+skipped=()
+
+# Whether update_system runs its updater as root (an AUR helper asks for root itself).
+system_needs_root() {
+  case "$SYSTEM_KIND" in
+    dnf | image) return 0 ;;
+    pacman) [[ -z "$AUR_HELPER" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 update_system() {
   case "$SYSTEM_KIND" in
-    dnf) sudo -n dnf -y -q upgrade ;;
+    dnf) as_root dnf -y -q upgrade ;;
     pacman)
       if [[ -n "$AUR_HELPER" ]]; then
         "$AUR_HELPER" -Syu --noconfirm
       else
-        sudo -n pacman -Syu --noconfirm
+        as_root pacman -Syu --noconfirm
       fi
       ;;
     omarchy)
@@ -123,7 +359,13 @@ update_system() {
       ;;
     image)
       # Stages the new image; it boots on the next restart and the old one stays in the boot menu.
-      sudo -n bootc upgrade
+      if [[ -n "$IMAGE_CHANGES" ]]; then
+        echo "This system has packages of its own on top of the image ($IMAGE_CHANGES)."
+        echo "bootc refuses to upgrade it, so rpm-ostree upgrades the image instead and keeps what the next boot has."
+        as_root rpm-ostree upgrade
+      else
+        as_root bootc upgrade
+      fi
       ;;
     ostree)
       echo "This is not the Herald OS image, so the system is left to its own updates (its software center, rpm-ostree upgrade or bootc upgrade)."
@@ -132,29 +374,217 @@ update_system() {
   esac
 }
 
-# One-shot migrations, tracked by file name so each runs exactly once per machine. Appends failures
-# to `failed`.
+# One line per step for the summary at the end. `failed` holds the steps that make the update fail,
+# `warnings` the ones that are only reported (Flatpaks, Hermes Agent), `skipped` the ones that
+# need root this run does not have.
+summary=()
 failed=()
-run_migrations() {
-  # A checkout's migrations, the ones that came with this command (a link into /opt/herald-os), or the
-  # installed package's (/usr/share/herald-os/migrations).
-  local dir="$REPO/linux/migrations"
-  [[ -d "$dir" ]] || dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../migrations"
-  [[ -d "$dir" ]] || dir=/usr/share/herald-os/migrations
-  [[ -d "$dir" ]] || return 0
-  sudo -n mkdir -p "$MIGRATIONS_DONE"
-  local migration name
+warnings=()
+step() { summary+=("$(printf '  %-16s %s' "$1" "$2")"); }
+
+# One-shot migrations, run in file-name order, each once. Their "# Runs as:" line says whose they are:
+#   root             system files. Runs as root, and is recorded once for the machine in
+#                    $MIGRATIONS_DONE, which only root can write; without root it waits for a run
+#                    with it.
+#   user             the person's home and user units (systemctl --user). Runs as the person, never
+#                    as root: root's home is not theirs. Recorded in their own
+#                    ~/.local/state/herald-os/migrations, which they can write without root, so it
+#                    runs once for each account, and every account gets it.
+#   user, with sudo  the same, plus system steps it takes through sudo -n, so it also waits until sudo
+#                    works for the person.
+# A migration without the line is a user one. Appends failures to `failed`.
+migration_kind() {
+  case "$(sed -n 's/^# Runs as: *//p' "$1" | head -n 1)" in
+    root) echo root ;;
+    "user, with sudo") echo user-sudo ;;
+    *) echo user ;;
+  esac
+}
+
+# Whose user migrations are: this account's, or as root under sudo the account that ran sudo. As
+# root without sudo (a root login) there is no person to run them as.
+migration_user() {
+  if [[ $EUID -ne 0 ]]; then
+    echo self
+  elif [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
+    echo sudo
+  else
+    echo none
+  fi
+}
+as_user() {
+  if [[ $MIGRATION_USER == self ]]; then
+    "$@"
+  else
+    sudo -n -u "$SUDO_USER" -H "$@"
+  fi
+}
+# `user_marker check|write NAME`, in the person's own state folder.
+user_marker() {
+  # shellcheck disable=SC2016 # $HOME is the person's, expanded in their shell.
+  as_user sh -c 'd="$HOME/.local/state/herald-os/migrations"; if [ "$1" = check ]; then test -f "$d/$2"; else mkdir -p "$d" && touch "$d/$2"; fi' sh "$1" "$2"
+}
+# Whether user migrations have somewhere to run: under sudo, an account sudo can run as, and in
+# any case a home folder the person can write (where they are recorded). Checked once; when not,
+# PERSON_PROBLEM says why, once, rather than every migration failing on its own.
+person_ready() {
+  if [[ -z "${PERSON_CHECKED:-}" ]]; then
+    PERSON_CHECKED=1
+    PERSON_PROBLEM=""
+    # shellcheck disable=SC2016 # $HOME is the person's, expanded in their shell.
+    if [[ $MIGRATION_USER == sudo ]] && ! as_user true 2>/dev/null; then
+      PERSON_PROBLEM="SUDO_USER=$SUDO_USER is not an account sudo can run as"
+      echo "WARNING: $PERSON_PROBLEM, so user migrations did not run" >&2
+    elif ! as_user sh -c '[ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ -w "$HOME" ]' 2>/dev/null; then
+      PERSON_PROBLEM="${SUDO_USER:-${USER:-this account}} has no home folder to run them in"
+    fi
+  fi
+  [[ -z "$PERSON_PROBLEM" ]]
+}
+# Runs a user migration as the person, with no input and without the migration list on fd 3. Under
+# sudo, their checkout and user units are theirs: no REPO from root (the migration finds
+# ~/Herald-OS itself), and their runtime folder for systemctl --user.
+run_as_user() {
+  local uid=""
+  if [[ $MIGRATION_USER == self ]]; then
+    REPO="$REPO" bash "$1" </dev/null
+  else
+    uid="$(id -u "$SUDO_USER" 2>/dev/null || true)"
+    as_user env ${uid:+XDG_RUNTIME_DIR="/run/user/$uid"} bash "$1" </dev/null
+  fi
+}
+
+# Where migrations are: a checkout's, the ones that came with this command (a link into
+# /opt/herald-os), or the installed package's (/usr/share/herald-os/migrations). `installed` skips
+# the checkout: under sudo that is root's ~/Herald-OS, which the person cannot read, so their
+# migrations come from where this command is installed.
+migrations_dir() {
+  local dir
+  for dir in ${1:+"$REPO/linux/migrations"} "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../migrations" /usr/share/herald-os/migrations; do
+    if [[ -d "$dir" ]]; then
+      (cd "$dir" && pwd -P)
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Every migration to consider, as "name<TAB>path<TAB>kind", one per name. They are all the usual
+# folder's, except that under sudo the person's come from the installed folder (`mine`). A name in
+# both is the usual folder's to classify, as root reads both: its root migrations run from there,
+# its user ones from the installed copy, and a copy that says otherwise is warned about.
+migration_list() {
+  local dir="$1" mine="$2" migration name kind other
   for migration in "$dir"/*.sh; do
     [[ -f "$migration" ]] || continue
     name="$(basename "$migration")"
-    [[ -f "$MIGRATIONS_DONE/$name" ]] && continue
+    kind="$(migration_kind "$migration")"
+    other=""
+    if [[ -n "$mine" && -f "$mine/$name" && ! "$mine/$name" -ef "$migration" ]]; then
+      other="$(migration_kind "$mine/$name")"
+    fi
+    if [[ -n "$other" && $other != "$kind" ]]; then
+      echo "WARNING: migration $name is $kind in $dir but $other in $mine; it runs as $kind" >&2
+    fi
+    if [[ -z "$mine" || $kind == root ]]; then
+      printf '%s\t%s\t%s\n' "$name" "$migration" "$kind"
+    elif [[ -f "$mine/$name" ]]; then
+      printf '%s\t%s\t%s\n' "$name" "$mine/$name" "$kind"
+    else
+      echo "WARNING: migration $name is only in $dir, which $SUDO_USER cannot read, so it did not run" >&2
+    fi
+  done
+  [[ -n "$mine" ]] || return 0
+  for migration in "$mine"/*.sh; do
+    [[ -f "$migration" ]] || continue
+    name="$(basename "$migration")"
+    [[ -f "$dir/$name" ]] && continue
+    kind="$(migration_kind "$migration")"
+    if [[ $kind != root ]]; then
+      printf '%s\t%s\t%s\n' "$name" "$migration" "$kind"
+    fi
+  done
+}
+
+run_migrations() {
+  local dir mine=""
+  dir="$(migrations_dir checkout)" || return 0
+  MIGRATION_USER="$(migration_user)"
+  if [[ $MIGRATION_USER == sudo ]]; then
+    mine="$(migrations_dir)" || mine=""
+  fi
+  local migration name kind entry entries=() waiting=() waiting_person=() no_user=()
+  # The whole list is read before any migration runs, so that none of them inherits the pipe it
+  # came through (or any other descriptor of this loop) and can swallow the rest of it.
+  while IFS= read -r entry; do
+    entries+=("$entry")
+  done < <(migration_list "$dir" "$mine" | sort -t "$(printf '\t')" -k 1,1)
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    IFS=$'\t' read -r name migration kind <<<"$entry"
+    [[ -n "$name" ]] || continue
+    if [[ $kind == root ]]; then
+      [[ -f "$MIGRATIONS_DONE/$name" ]] && continue
+      # Without root, sudo would print "a password is required" at each step, and nothing would
+      # be recorded, so it would run again next time: it waits for a run with root instead.
+      if ! have_root; then
+        waiting+=("$name")
+        continue
+      fi
+      echo "==> migration $name (as root)"
+      if as_root env REPO="$REPO" bash "$migration" </dev/null; then
+        as_root mkdir -p "$MIGRATIONS_DONE" && as_root touch "$MIGRATIONS_DONE/$name"
+      else
+        failed+=("migration:$name")
+      fi
+      continue
+    fi
+    if [[ $MIGRATION_USER == none ]] || ! person_ready; then
+      no_user+=("$name")
+      continue
+    fi
+    user_marker check "$name" && continue
+    # A "user, with sudo" migration runs as the person and takes its system steps through their
+    # own sudo -n. Under sudo that cannot work: sudo -u gives it a new pseudo-terminal (Fedora's
+    # use_pty), where the password typed for this run is not remembered. So it waits for the
+    # person's own run in a terminal, where sudo asks them once and remembers it.
+    if [[ $kind == user-sudo && $MIGRATION_USER == sudo ]]; then
+      waiting_person+=("$name")
+      continue
+    fi
+    if [[ $kind == user-sudo ]] && ! have_root; then
+      waiting+=("$name")
+      continue
+    fi
+    if ! as_user test -r "$migration"; then
+      echo "WARNING: ${SUDO_USER:-${USER:-this account}} cannot read $migration, so migration $name did not run" >&2
+      continue
+    fi
     echo "==> migration $name"
-    if REPO="$REPO" bash "$migration"; then
-      sudo -n touch "$MIGRATIONS_DONE/$name"
+    if run_as_user "$migration"; then
+      if ! user_marker write "$name"; then
+        echo "WARNING: migration $name ran, but could not be recorded in ~/.local/state/herald-os/migrations; it will run again on the next update" >&2
+      fi
     else
       failed+=("migration:$name")
     fi
   done
+  if [[ ${#waiting[@]} -gt 0 ]]; then
+    skipped+=(migrations)
+    not_run migrations migrations "${waiting[*]}" ""
+  fi
+  if [[ ${#waiting_person[@]} -gt 0 ]]; then
+    echo "==> migrations: skipped ${waiting_person[*]} (they take system steps as $SUDO_USER: run herald-os update, without sudo, in a terminal)"
+    step migrations "skipped ${waiting_person[*]} (run herald-os update, without sudo, in a terminal)"
+  fi
+  if [[ ${#no_user[@]} -gt 0 ]]; then
+    if [[ -n "${PERSON_PROBLEM:-}" ]]; then
+      echo "==> user migrations: skipped ($PERSON_PROBLEM)"
+      step user-migrations "skipped ${no_user[*]} ($PERSON_PROBLEM)"
+    else
+      echo "==> user migrations: skipped (they run as a person, not as root: run herald-os update from your account)"
+      step user-migrations "skipped ${no_user[*]} (run herald-os update from your account)"
+    fi
+  fi
 }
 
 if [[ $MIGRATE -eq 1 ]]; then
@@ -193,13 +623,20 @@ if [[ -n "$TARBALL" ]]; then
   esac
 fi
 
+# An image whose updates could not be checked counts as none, so the menu bar shows no dot for it,
+# and the summary says it was not checked.
 pending_pkgs=0
-if [[ $SYSTEM -eq 1 ]]; then
+pkgs_unknown=false
+if [[ $CHECK -eq 1 && $SYSTEM -eq 1 ]]; then
   pending_pkgs="$(count_system_updates)"
+  if [[ $pending_pkgs == unknown ]]; then
+    pending_pkgs=0
+    pkgs_unknown=true
+  fi
 fi
 
 pending_flatpaks=0
-if [[ $SYSTEM -eq 1 ]] && command -v flatpak >/dev/null; then
+if [[ $CHECK -eq 1 && $SYSTEM -eq 1 ]] && command -v flatpak >/dev/null; then
   pending_flatpaks="$(flatpak remote-ls --user --updates --columns=application flathub 2>/dev/null | grep -c . || true)"
 fi
 
@@ -213,15 +650,16 @@ if [[ $CHECK -eq 1 ]]; then
   [[ $pending_tarball -gt 0 ]] && parts+=("Herald OS $tarball_version")
   [[ $pending_pkgs -gt 0 ]] && parts+=("$(plural "$pending_pkgs" package)")
   [[ $pending_flatpaks -gt 0 ]] && parts+=("$(plural "$pending_flatpaks" app)")
-  summary="up to date"
+  [[ $pkgs_unknown == true ]] && parts+=("system updates not checked")
+  check_summary="up to date"
   if [[ ${#parts[@]} -gt 0 ]]; then
-    summary="$(printf '%s, ' "${parts[@]}")"
-    summary="${summary%, }"
+    check_summary="$(printf '%s, ' "${parts[@]}")"
+    check_summary="${check_summary%, }"
   fi
-  printf '{"channel":"%s","checkedAt":"%s","pending":%d,"shell":%d,"packages":%d,"flatpaks":%d}\n' \
-    "$CHANNEL" "$(date -Is)" "$total" "$((pending_repo + pending_tarball))" "$pending_pkgs" "$pending_flatpaks" >"$STATE/update-available.json"
-  echo "$summary"
-  report "$total" "$summary"
+  printf '{"channel":"%s","checkedAt":"%s","pending":%d,"shell":%d,"packages":%d,"packagesUnknown":%s,"flatpaks":%d}\n' \
+    "$CHANNEL" "$(now)" "$total" "$((pending_repo + pending_tarball))" "$pending_pkgs" "$pkgs_unknown" "$pending_flatpaks" >"$STATE/update-available.json"
+  echo "$check_summary"
+  report "$total" "$check_summary"
   exit 0
 fi
 
@@ -229,9 +667,62 @@ fi
 echo "==> Herald OS update ($CHANNEL)"
 notify "Updating Herald OS" "This can take a few minutes."
 
+# The line of a command's output that says what went wrong: its last error, or else its last line.
+error_of() {
+  local line
+  line="$(printf '%s\n' "$1" | grep -iE 'error' | tail -n 1)"
+  [[ -n "$line" ]] || line="$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -n 1)"
+  line="${line#*[Ee]rror: }"
+  echo "${line:-no output}"
+}
+
+# Flatpaks in one installation: `update_flatpaks --user`, or `update_flatpaks --system sudo -n` with
+# the command that runs flatpak as root. When the update as a whole fails, each installed ref is
+# updated on its own, so that one broken app neither holds back the rest nor goes unnamed. Each
+# failure goes to flatpak_problems as "ref: error".
+flatpak_problems=()
+update_flatpaks() {
+  local scope="$1" out all ref refs
+  shift
+  flatpak_problems=()
+  all="$("$@" flatpak update -y --noninteractive "$scope" 2>&1)" && return 0
+  refs=()
+  while IFS= read -r ref || [[ -n "$ref" ]]; do
+    [[ -n "${ref//[[:space:]]/}" ]] && refs+=("$ref")
+  done < <(flatpak list "$scope" --columns=ref 2>/dev/null)
+  if [[ ${#refs[@]} -eq 0 ]]; then
+    flatpak_problems+=("$(error_of "$all")")
+    return 1
+  fi
+  for ref in "${refs[@]}"; do
+    out="$("$@" flatpak update -y --noninteractive "$scope" "$ref" 2>&1)" || flatpak_problems+=("$ref: $(error_of "$out")")
+  done
+  [[ ${#flatpak_problems[@]} -eq 0 ]]
+}
+
+# Runs one Flatpak installation's update and reports it as the step $1 (and, if it fails, in warnings).
+flatpak_step() {
+  local label="$1" problem
+  shift
+  if update_flatpaks "$@"; then
+    step "$label" ok
+    return
+  fi
+  warnings+=("$label")
+  for problem in "${flatpak_problems[@]}"; do
+    echo "WARNING: $label: $problem" >&2
+  done
+  step "$label" "did not all update: $(printf '%s; ' "${flatpak_problems[@]}" | sed 's/; $//')"
+}
+
 if [[ -n "$repo_remote" && $pending_repo -gt 0 ]]; then
   echo "==> shell: pulling $repo_remote"
-  git -C "$REPO" pull --ff-only --quiet origin "$(branch_for_channel)" || failed+=(shell)
+  if git -C "$REPO" pull --ff-only --quiet origin "$(branch_for_channel)"; then
+    step shell "updated from $repo_remote"
+  else
+    failed+=(shell)
+    step shell "FAILED: git pull --ff-only from $repo_remote"
+  fi
 fi
 
 # Before the migrations, so that the new version's migrations run in the same update.
@@ -243,48 +734,119 @@ if [[ $pending_tarball -eq 1 ]]; then
     echo "Herald OS $tarball_version did not install; in a terminal, herald-os update can ask for your password."
     failed+=(herald-os)
   fi
+  if [[ " ${failed[*]-} " == *" herald-os "* ]]; then
+    step herald-os "FAILED: $tarball_version did not install"
+  else
+    step herald-os "$tarball_version installed"
+  fi
 fi
 
+failed_before=${#failed[@]}
 run_migrations
+if [[ ${#failed[@]} -gt $failed_before ]]; then
+  step migrations "FAILED: ${failed[*]:$failed_before}"
+fi
 
 if [[ $SYSTEM -eq 1 ]]; then
   echo "==> system ($SYSTEM_KIND)"
-  update_system || failed+=(packages)
+  system_tool="$SYSTEM_KIND"
+  if [[ $SYSTEM_KIND == image ]]; then
+    system_tool="bootc upgrade"
+    [[ -n "$IMAGE_CHANGES" ]] && system_tool="rpm-ostree upgrade; $IMAGE_CHANGES"
+  fi
+  [[ -n "${ADMIN:-}" ]] || ADMIN="$(admin_access)"
+  # Without a way to root (from the menu) the system step is skipped rather than failed, and stays
+  # out of problems= and the exit status: `sudo herald-os update` updates it.
+  if system_needs_root && [[ $ADMIN == none ]]; then
+    skipped+=(system)
+    not_run system system "" "$system_tool"
+  else
+    update_system
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
+      step system "ok ($system_tool)"
+    else
+      failed+=(system)
+      step system "FAILED ($system_tool, exit $rc)"
+    fi
+  fi
   if command -v flatpak >/dev/null; then
     echo "==> flatpaks"
-    flatpak update -y --noninteractive --user >/dev/null || failed+=(flatpaks)
+    flatpak_step flatpaks --user
+    # The system installation (where the image puts its apps) needs root, so without it the pass is
+    # skipped the same way.
+    if [[ -n "$(flatpak list --system --columns=ref 2>/dev/null)" ]]; then
+      if [[ $ADMIN == none ]]; then
+        skipped+=(system-flatpaks)
+        not_run "system flatpaks" system-flatpaks "" ""
+      else
+        echo "==> system flatpaks"
+        flatpak_step system-flatpaks --system as_root
+      fi
+    fi
   fi
 fi
 
 if [[ $HERMES -eq 1 ]]; then
   # The checkout in ~/.hermes/hermes-agent, in whichever layout its installer left; a Hermes that
   # came from another installer is that installer's to update.
-  mapfile -t hermes < <(herald-os hermes-command --managed 2>/dev/null)
+  hermes=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] && hermes+=("$line")
+  done < <(herald-os hermes-command --managed 2>/dev/null)
   if [[ ${#hermes[@]} -gt 0 ]]; then
     echo "==> Hermes Agent"
-    "${hermes[@]}" update </dev/null >/dev/null 2>&1 || echo "WARNING: hermes update did not complete (run it in a terminal)"
+    if "${hermes[@]}" update </dev/null >/dev/null 2>&1; then
+      step hermes ok
+    else
+      echo "WARNING: hermes update did not complete (run it in a terminal)"
+      warnings+=(hermes)
+      step hermes "did not complete (run hermes update in a terminal)"
+    fi
   fi
 fi
 
-if [[ -x "$REPO/linux/dev/build.sh" && ( $pending_repo -gt 0 || -n "${HERALD_OS_FORCE_REBUILD:-}" ) ]]; then
+if [[ -x "$REPO/linux/dev/build.sh" && ( $pending_repo -gt 0 || -n "$FORCE_REBUILD" ) ]]; then
   echo "==> rebuilding the shell"
-  bash "$REPO/linux/dev/build.sh" || failed+=(build)
+  if bash "$REPO/linux/dev/build.sh"; then
+    step build ok
+  else
+    failed+=(build)
+    step build "FAILED: linux/dev/build.sh"
+  fi
 fi
 
-printf '{"channel":"%s","checkedAt":"%s","pending":0,"shell":0,"packages":0,"flatpaks":0}\n' "$CHANNEL" "$(date -Is)" >"$STATE/update-available.json"
+printf '{"channel":"%s","checkedAt":"%s","pending":0,"shell":0,"packages":0,"flatpaks":0}\n' "$CHANNEL" "$(now)" >"$STATE/update-available.json"
 report 0 "up to date"
+
+problems=(${failed[@]+"${failed[@]}"} ${warnings[@]+"${warnings[@]}"})
 
 # Hooks in ~/.config/herald-os/hooks/after-update.d/ and "after Herald OS updates" automations.
 if command -v herald-os >/dev/null; then
-  herald-os event after-update "problems=${failed[*]:-none}" >/dev/null 2>&1 || true
+  herald-os event after-update "problems=${problems[*]:-none}" >/dev/null 2>&1 || true
 fi
 
+echo "==> summary"
+if [[ ${#summary[@]} -gt 0 ]]; then
+  printf '%s\n' "${summary[@]}"
+else
+  echo "  nothing to update"
+fi
+
+if [[ ${#skipped[@]} -gt 0 ]]; then
+  echo "skipped: ${skipped[*]} (run sudo herald-os update to update them)"
+fi
 if [[ ${#failed[@]} -gt 0 ]]; then
-  notify "Update finished with problems" "${failed[*]}"
+  notify "Update finished with problems" "${problems[*]}"
   echo "failed: ${failed[*]}" >&2
   exit 1
 fi
-if [[ $pending_tarball -eq 1 ]]; then
+if [[ ${#warnings[@]} -gt 0 ]]; then
+  notify "Update finished with problems" "${problems[*]}"
+  echo "not updated: ${warnings[*]}" >&2
+elif [[ ${#skipped[@]} -gt 0 ]]; then
+  notify "Herald OS updated its own parts" "The system needs root: run sudo herald-os update in a terminal."
+elif [[ $pending_tarball -eq 1 ]]; then
   notify "Herald OS $tarball_version is installed" "Log out and back in (or restart herald-os-app) to use it."
 else
   notify "Herald OS is up to date" "Restart the shell to use the new build."

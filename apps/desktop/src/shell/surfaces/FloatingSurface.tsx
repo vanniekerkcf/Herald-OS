@@ -17,6 +17,8 @@ const CanvasWindow = lazy(() => import('../../features/canvas/CanvasWindow.tsx')
 const DocsWindow = lazy(() => import('../../features/office/docs/DocsWindow.tsx').then(m => ({ default: m.DocsWindow })))
 const SheetsWindow = lazy(() => import('../../features/office/sheets/SheetsWindow.tsx').then(m => ({ default: m.SheetsWindow })))
 const SlidesWindow = lazy(() => import('../../features/office/slides/SlidesWindow.tsx').then(m => ({ default: m.SlidesWindow })))
+const RoomWindow = lazy(() => import('../../features/room/RoomWindow.tsx').then(m => ({ default: m.RoomWindow })))
+const CalcWindow = lazy(() => import('../../features/calc/CalcWindow.tsx').then(m => ({ default: m.CalcWindow })))
 
 const isFloatingAppId = (value: string): value is FloatingAppId => FLOATING_APPS.some(app => app.id === value)
 
@@ -27,7 +29,7 @@ function FloatingContent({ appId, payload }: { appId: FloatingAppId; payload: Re
     case 'system':
       return <SystemSurface />
     case 'chat-popout':
-      return <ChatPopout sessionId={typeof payload.sessionId === 'string' ? payload.sessionId : undefined} />
+      return <ChatPopout sessionId={typeof payload.sessionId === 'string' ? payload.sessionId : undefined} profile={typeof payload.profile === 'string' ? payload.profile : undefined} />
     case 'studio':
       // The compositor owns this window; the preview opens as its own window there.
       return <StudioWindow win={{ id: 'panel-studio', appId: 'studio', title: 'Studio', bounds: { x: 0, y: 0, width: 0, height: 0 }, z: 0, phase: 'open', maximized: true, payload }} />
@@ -45,6 +47,10 @@ function FloatingContent({ appId, payload }: { appId: FloatingAppId; payload: Re
       return <SheetsWindow payload={payload} />
     case 'slides':
       return <SlidesWindow payload={payload} />
+    case 'room':
+      return <RoomWindow />
+    case 'calc':
+      return <CalcWindow payload={payload} />
     default:
       return null
   }

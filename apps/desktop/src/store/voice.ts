@@ -1,13 +1,15 @@
 import type { VoiceEngine, VoicePrefs } from '../../shared/ipc.ts'
 import { atom, computed } from 'nanostores'
-import { $micLevel, $micOpen, setMicrophoneMuted } from '../lib/voice/audio-capture.ts'
+import { acknowledgeCaptureNotice, $captureNotice, $micLevel, $micOpen, microphoneDenied, setCaptureConversing, setMicrophoneMuted } from '../lib/voice/audio-capture.ts'
+import { privacyPaneActions } from '../lib/privacy-pane.ts'
+import { logFailure } from '../lib/report.ts'
 import { earcons } from '../lib/voice/earcons.ts'
 import type { ConversationEndReason, ConversationEngine, TurnHandlers, VoiceCaptions, VoiceHost, VoiceState } from '../lib/voice/engine.ts'
 import { matchIntent } from '../lib/voice/intents.ts'
 import { rememberFocusedEditable } from './edit-target.ts'
 import { runCommand } from './os-commands.ts'
-import { withProviderFallback } from '../lib/voice/provider-fallback.ts'
-import { $speakLevel, speakOnce, stopFallbackAudio } from '../lib/voice/speak-stream.ts'
+import { type SpeechOutcome, speakWithFallbacks } from '../lib/voice/speak-fallback.ts'
+import { $speakLevel, stopFallbackAudio } from '../lib/voice/speak-stream.ts'
 import { rest } from '../lib/rest.ts'
 import { sanitizeForSpeech } from '../lib/voice/speech-text.ts'
 import { type LocalSttConfig, sttTuningPatch } from '../lib/voice/stt-tuning.ts'
@@ -451,12 +453,14 @@ export async function startVoice(reason: VoiceStartReason = 'button'): Promise<v
     engine = next
     patch({ engine: resolved.engine })
     await next.start()
+    // Spoken math is answered at once when Herald Calc's engine is loaded before the first question.
+    void import('../features/calc/engine/index.ts').then(calc => calc.loadEngine()).catch(logFailure('calc.loadEngine'))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     engine = null
     patch({ state: idleState(), engine: null, error: message })
     earcons.error()
-    notify({ title: 'Voice could not start', body: message, level: 'error' })
+    notify({ title: 'Voice could not start', body: message, level: 'error', actions: microphoneDenied(error) ? privacyPaneActions('microphone') : undefined })
     void resumeWake()
   } finally {
     starting = false
@@ -491,6 +495,8 @@ export async function endConversation(reason: ConversationEndReason = 'user', de
   }
 
   const error = reason === 'error' || reason === 'connection-lost' ? (detail ?? 'The conversation ended unexpectedly.') : null
+  // The wake word keeps the microphone open after a conversation, and must not inherit its mute.
+  setMicrophoneMuted(false)
   patch({ state: idleState(), engine: null, muted: false, error, startedBy: null })
 
   if (error) {
@@ -545,13 +551,17 @@ export function setLiveSessionSeconds(seconds: number): void {
   patch({ live: { ...$voice.get().live, sessionSeconds: seconds } })
 }
 
-/** Speak a line, switching the Hermes TTS provider to the free one when the configured one cannot run. */
-export function speakWithFreeFallback(text: string, signal?: { stopped: boolean }): Promise<void> {
-  return withProviderFallback(
-    'tts',
-    () => speakOnce(text, signal),
-    (from, to) => notify({ title: 'Text to speech switched', body: `${from ?? 'The configured provider'} is not set up; using the free ${to} voice. Change it in Settings > Voice.`, level: 'info' })
-  )
+/**
+ * Speak a line, switching the Hermes TTS provider to the free one when the configured one cannot
+ * run, and with the computer's own voice when Hermes's still fails. `notice: false` leaves telling
+ * the person to the caller, which reports the outcome itself.
+ */
+export function speakWithFreeFallback(text: string, signal?: { stopped: boolean }, { notice = true }: { notice?: boolean } = {}): Promise<SpeechOutcome> {
+  return speakWithFallbacks(text, {
+    signal,
+    onSwitched: (from, to) => notify({ title: 'Text to speech switched', body: `${from ?? 'The configured provider'} is not set up; using the free ${to} voice. Change it in Settings > Voice.`, level: 'info' }),
+    notify: notice ? (title, body, level) => notify({ title, body, level }) : undefined
+  })
 }
 
 let announcing: { stopped: boolean } | null = null
@@ -680,6 +690,15 @@ export function bindVoice(): () => void {
       void tuneLocalStt()
     }
   })
+  // A change of device caused by the system waits for a conversation to end; the graph needs to know
+  // when one is listening. A change the person made in the picker applies at once and does not wait.
+  const offActive = $voiceActive.subscribe(active => setCaptureConversing(active))
+  const offMicrophone = $captureNotice.listen(notice => {
+    if (notice) {
+      notify({ title: 'Microphone', body: notice.message, level: 'info', surface: 'chat', key: notice.key })
+      acknowledgeCaptureNotice()
+    }
+  })
 
   return () => {
     offPrefs()
@@ -687,6 +706,8 @@ export function bindVoice(): () => void {
     offCommand()
     offNotify()
     offReady()
+    offActive()
+    offMicrophone()
     bound = false
   }
 }

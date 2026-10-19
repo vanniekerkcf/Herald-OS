@@ -1,7 +1,7 @@
 {
   "name": "@herald-os/desktop",
   "productName": "Herald OS",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.5",
   "private": true,
   "description": "The Herald OS shell: menu bar, dock, windows and apps for an agent-native operating system.",
   "author": "Luke The Dev",
@@ -19,7 +19,8 @@
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "vitest run",
-    "dist:mac": "npm run build && electron-builder --mac --arm64 -c.npmRebuild=false --publish never",
+    "dist:mac": "npm run build && npm run pack:mac --",
+    "pack:mac": "electron-builder --mac --arm64 --x64 -c.npmRebuild=false --publish never",
     "dist:linux": "npm run build && electron-builder --linux --publish never"
   },
   "dependencies": {
@@ -100,6 +101,7 @@
     "echarts": "6.1.0",
     "exceljs": "4.4.0",
     "jszip": "3.10.2",
+    "mathjs": "15.2.0",
     "mdast-util-from-markdown": "2.0.3",
     "mdast-util-gfm": "3.1.0",
     "mdast-util-to-markdown": "2.1.2",
@@ -117,6 +119,7 @@
     "yaml": "2.9.1"
   },
   "devDependencies": {
+    "@tailwindcss/node": "4.3.3",
     "@tailwindcss/vite": "4.3.3",
     "@types/mdast": "4.0.4",
     "@types/node": "22.20.3",
@@ -127,6 +130,7 @@
     "electron": "44.5.1",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
+    "happy-dom": "21.0.1",
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3",
     "vite": "8.3.0",
@@ -159,6 +163,8 @@
       "!**/node_modules/{pptxgenjs,image-size,queue}/**",
       "!**/node_modules/{jszip,lie,setimmediate}/**",
       "!**/node_modules/{echarts,zrender}/**",
+      "!**/node_modules/{mathjs,complex.js,fraction.js,typed-function,tiny-emitter,escape-latex,javascript-natural-sort,seedrandom}/**",
+      "!**/node_modules/@babel/runtime/**",
       "!**/node_modules/{onnxruntime-web,onnxruntime-common}/**",
       "!**/node_modules/@tabler/**",
       "!**/node_modules/ag-psd/**"
@@ -188,8 +194,10 @@
     "asar": true,
     "asarUnpack": [
       "**/*.node",
-      "**/node-pty/prebuilds/**"
+      "**/node-pty/prebuilds/**",
+      "**/node-pty/build/Release/spawn-helper"
     ],
+    "afterPack": "scripts/after-pack.mjs",
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
@@ -201,6 +209,9 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
+      "files": [
+        "!**/node_modules/node-pty/build/**"
+      ],
       "extraResources": [
         {
           "from": "../../plugins/herald-os-bridge",
@@ -218,7 +229,8 @@
         "NSMicrophoneUsageDescription": "Herald OS uses the microphone for voice input.",
         "NSCameraUsageDescription": "Herald OS shows your camera in a bubble while you record the screen, when you turn it on.",
         "NSCalendarsFullAccessUsageDescription": "Herald OS shows today's events on the Overview, and gives their titles and times to Hermes when you turn on Pick up where you left off.",
-        "NSCalendarsUsageDescription": "Herald OS shows today's events on the Overview, and gives their titles and times to Hermes when you turn on Pick up where you left off."
+        "NSCalendarsUsageDescription": "Herald OS shows today's events on the Overview, and gives their titles and times to Hermes when you turn on Pick up where you left off.",
+        "NSLocalNetworkUsageDescription": "Herald OS lets Hermes reach the devices on your local network that you set it up to use, such as a computer that runs your model."
       }
     },
     "dmg": {

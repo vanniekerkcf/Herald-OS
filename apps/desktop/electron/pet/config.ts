@@ -113,6 +113,8 @@ function stamp(file: string): string | null {
   }
 }
 
+const sheetMime = (sheet: string): 'image/png' | 'image/webp' => (path.extname(sheet).toLowerCase() === '.png' ? 'image/png' : 'image/webp')
+
 /** The pet Hermes shows and every pet installed; never throws. */
 export function readPetInfo(home = hermesHome()): PetInfo {
   try {
@@ -120,15 +122,17 @@ export function readPetInfo(home = hermesHome()): PetInfo {
     const pets = installedPets(home)
     const wanted = safePetSlug(config.slug)
     const active = pets.find(pet => pet.slug === wanted) ?? pets[0] ?? null
+    const installed = pets.map(({ slug, displayName, sheet }) => ({ slug, displayName, revision: stamp(sheet), mime: sheetMime(sheet) }))
+    const shown = active ? installed[pets.indexOf(active)] : null
 
     return {
       enabled: config.enabled,
-      slug: active?.slug ?? null,
-      displayName: active?.displayName ?? null,
+      slug: shown?.slug ?? null,
+      displayName: shown?.displayName ?? null,
       scale: config.scale,
-      revision: active ? stamp(active.sheet) : null,
-      mime: active ? (path.extname(active.sheet).toLowerCase() === '.png' ? 'image/png' : 'image/webp') : null,
-      installed: pets.map(({ slug, displayName }) => ({ slug, displayName }))
+      revision: shown?.revision ?? null,
+      mime: shown?.mime ?? null,
+      installed
     }
   } catch {
     return PET_OFF

@@ -299,6 +299,78 @@ def test_slides_print_what_they_read(monkeypatch, capsys):
     assert all(timeout >= 60 for timeout in timeouts)
 
 
+def test_calc_words_become_calc_commands(monkeypatch):
+    assert cli.calc_request(["20%", "of", "84.50"]) == ("calc.eval", {"text": "20% of 84.50"})
+    assert cli.calc_request(["2,400 + 180 split 3 ways", "--steps"]) == ("calc.eval", {"text": "2,400 + 180 split 3 ways"})
+    assert cli.calc_request(["--json", "-5", "+", "3"]) == ("calc.eval", {"text": "-5 + 3"})
+    assert cli.calc_request(["convert", "5", "km", "miles"]) == ("calc.convert", {"value": "5", "from": "km", "to": "miles"})
+    assert cli.calc_request(["convert", "100", "USD", "to", "BRL"]) == ("calc.convert", {"value": "100", "from": "USD", "to": "BRL"})
+    assert cli.calc_request(["convert", "5", "ft", "3", "in", "ft", "cm"]) == ("calc.convert", {"value": "5 ft 3 in", "from": "ft", "to": "cm"})
+    assert cli.calc_request(["convert", "9am", "New York", "to", "London"]) == ("calc.convert", {"value": "9am", "from": "New York", "to": "London"})
+    assert cli.calc_request(["history"]) == ("calc.history", {})
+    assert cli.calc_request(["history", "that", "mortgage", "thing"]) == ("calc.history", {"query": "that mortgage thing"})
+    assert cli.calc_request(["open"]) == ("calc.open", {})
+    assert cli.calc_request(["open", "rent = 1,200"]) == ("calc.open", {"text": "rent = 1,200"})
+    monkeypatch.setattr(sys, "stdin", io.StringIO("rent = 1,200\nrent * 12\n"))
+    assert cli.calc_request(["-"]) == ("calc.eval", {"text": "rent = 1,200\nrent * 12\n"})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(" \n"))
+    for wrong in ([], ["--steps"], ["convert", "5", "km"], ["-"]):
+        with pytest.raises(SystemExit) as stopped:
+            cli.calc_request(wrong)
+        assert stopped.value.code == 2, wrong
+
+
+def test_calc_prints_the_answer_its_working_or_its_data(monkeypatch, capsys):
+    tip = {"input": "84.50 + 15%", "display": "97.18", "value": "97.175", "kind": "number", "steps": ["84.50 + 15% = 84.50 × 1.15", "= 97.175"]}
+    reais = {"input": "100 USD in BRL", "display": "R$545.45", "value": "545.454545", "kind": "currency", "unit": "BRL", "steps": ["100 USD = 90.91 EUR", "= R$545.45"], "ratesDate": "2026-10-15"}
+    note = {"input": "rent = 1,200\nrent * 12\n5 kg + 2 m", "display": "14,400", "value": "14400", "kind": "number", "steps": [], "lines": [
+        {"index": 0, "source": "rent = 1,200", "display": "1,200"},
+        {"index": 1, "source": "rent * 12", "display": "14,400"},
+        {"index": 2, "source": "5 kg + 2 m", "error": "A mass and a length don't add up"},
+    ]}
+    replies = {
+        "84.50 + 15%": {"ok": True, "summary": "84.50 + 15% = 97.18", "data": tip},
+        "100 USD in BRL": {"ok": True, "summary": "100 USD in BRL = R$545.45 (ECB reference rates of 2026-10-15)", "data": reais},
+        note["input"]: {"ok": True, "summary": "rent * 12 = 14,400; 1 line has no answer", "data": note},
+    }
+    history = {"ok": True, "summary": "2 calculations, newest first", "items": [{"input": "84.50 + 15%", "result": "97.18"}, {"input": "rent =\n1,200", "result": "1,200"}], "data": {"query": "", "count": 2}}
+    sent = []
+
+    def run_os_wait(command, args=None, timeout=30):
+        sent.append((command, args, timeout))
+        return history if command == "calc.history" else {"ok": True, "summary": "Opened Herald Calc"} if command == "calc.open" else replies[args["text"]]
+
+    monkeypatch.setattr(cli, "run_os_wait", run_os_wait)
+    assert cli.calc_cmd(["84.50 + 15%"]) == 0
+    assert capsys.readouterr().out == "97.18\n"
+    cli.calc_cmd(["84.50 + 15%", "--steps"])
+    assert capsys.readouterr().out == "97.18\n  84.50 + 15% = 84.50 × 1.15\n  = 97.175\n"
+    cli.calc_cmd(["100 USD in BRL", "--steps"])
+    assert capsys.readouterr().out.splitlines()[-1] == "  (ECB reference rates of 2026-10-15)"
+    cli.calc_cmd(["100 USD in BRL", "--json"])
+    assert json.loads(capsys.readouterr().out) == reais
+    cli.calc_cmd([note["input"]])
+    assert capsys.readouterr().out == "rent = 1,200\t1,200\nrent * 12\t14,400\n5 kg + 2 m\t! A mass and a length don't add up\n"
+    cli.calc_cmd(["history"])
+    assert capsys.readouterr().out == "84.50 + 15% = 97.18\nrent = 1,200 = 1,200\n"
+    cli.calc_cmd(["history", "--json"])
+    assert json.loads(capsys.readouterr().out)["items"][0] == {"input": "84.50 + 15%", "result": "97.18"}
+    cli.calc_cmd(["open"])
+    assert capsys.readouterr().out == "Opened Herald Calc\n"
+    assert [command for command, _, _ in sent] == ["calc.eval"] * 5 + ["calc.history"] * 2 + ["calc.open"]
+    assert all(timeout >= 30 for _, _, timeout in sent)
+
+
+def test_calc_fails_with_the_engines_words(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(cli, "relay", lambda cmd, args, *rest, **kwargs: calls.append((cmd, args)) or {"ok": False, "error": 'Herald Calc does not know "banana"'})
+    with pytest.raises(SystemExit) as stopped:
+        cli.calc_cmd(["banana", "+", "2"])
+    assert stopped.value.code == 1
+    assert calls == [("os-run", ["calc.eval", json.dumps({"text": "banana + 2"})])]
+    assert 'Herald Calc does not know "banana"' in capsys.readouterr().err
+
+
 def test_herald_keymap_is_the_template():
     assert cli.render_keymap(TEMPLATE, "herald") == TEMPLATE
 
@@ -833,3 +905,551 @@ def test_plugin_add_waits_for_the_clone_and_says_it_is_off(monkeypatch, capsys):
     with pytest.raises(SystemExit) as stopped:
         cli.plugin_cmd(["remove"])
     assert stopped.value.code == 2
+
+
+QR_CASES = json.loads((ROOT / "apps" / "desktop" / "shared" / "qr-cases.json").read_text())
+
+
+@pytest.mark.parametrize("case", QR_CASES, ids=lambda case: f"{case['kind']}:{case['text'][:24]}")
+def test_qr_contents_are_described_the_way_the_shell_describes_them(case):
+    reading = cli.describe_qr(case["text"])
+    assert reading["kind"] == case["kind"]
+    assert reading["caption"] == case["caption"]
+    assert reading["description"] == case["description"]
+    assert reading.get("link") == case.get("link")
+    if case.get("full"):
+        assert reading["text"] == case["text"].strip()
+    else:
+        assert "text" not in reading
+        for secret in case["hidden"]:
+            assert secret not in json.dumps(reading, ensure_ascii=False)
+
+
+def zbar_xml(*symbols: str) -> bytes:
+    """zbarimg --xml output (0.23) for these symbols; each is a CDATA body or a full <data> element."""
+    body = "".join(
+        f"<symbol type='QR-Code' quality='1' orientation='UP'><polygon points='+31,+31 +31,+264 +265,+265 +264,+31'/>"
+        + (symbol if symbol.startswith("<data") else f"<data><![CDATA[{symbol}]]></data>")
+        + "</symbol>\n"
+        for symbol in symbols
+    )
+    index = f"<index num='0'>\n{body}</index>\n" if symbols else ""
+    return f"<barcodes xmlns='http://zbar.sourceforge.net/2008/barcode'>\n<source href='-'>\n{index}</source>\n</barcodes>\n".encode()
+
+
+def qr_scan(monkeypatch, *decoded: str, sensitive_ok: bool = True):
+    """Run capture_qr against a fake slurp, grim, zbarimg and wl-copy; returns (copies, notifications)."""
+    copies: list[tuple[list[str], bytes]] = []
+    notes: list[tuple[str, str]] = []
+
+    def run(argv, **kwargs):
+        if argv[0] == "grim":
+            return subprocess.CompletedProcess(argv, 0, b"png", b"")
+        if argv[0] == "zbarimg":
+            assert argv == ["zbarimg", "--xml", "-q", "-"]
+            return subprocess.CompletedProcess(argv, 0 if decoded else 4, zbar_xml(*decoded), b"")
+        if argv[0] == "wl-copy":
+            copies.append((argv, kwargs.get("input")))
+            assert kwargs.get("stdout") is subprocess.DEVNULL and kwargs.get("stderr") is subprocess.DEVNULL
+            return subprocess.CompletedProcess(argv, 0 if sensitive_ok or "--sensitive" not in argv else 1)
+        raise AssertionError(f"unexpected {argv}")
+
+    monkeypatch.setattr(cli, "need", lambda *tools: None)
+    monkeypatch.setattr(cli, "sh", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "10,10 100x100\n", ""))
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    monkeypatch.setattr(cli, "notify", lambda title, body="": notes.append((title, body)))
+    return copies, notes
+
+
+OTP = "otpauth://totp/GitHub:alice?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+
+
+def test_qr_secret_goes_on_the_clipboard_marked_sensitive_and_nowhere_else(monkeypatch, capsys):
+    copies, notes = qr_scan(monkeypatch, OTP)
+    assert cli.capture_qr([]) == 0
+    assert copies == [(["wl-copy", "--sensitive"], OTP.encode())]
+    assert notes == [("2FA setup code copied", "")]
+    out = capsys.readouterr().out
+    assert out == "2FA setup code copied\n"
+    assert "JBSWY3DPEHPK3PXP" not in out
+
+
+def test_qr_json_is_for_the_shell_and_print_is_for_scripts(monkeypatch, capsys):
+    qr_scan(monkeypatch, OTP)
+    assert cli.capture_qr(["--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"kind": "otp", "caption": "2FA setup code copied", "description": "a 2FA setup code for GitHub"}
+    assert cli.capture_qr(["--print"]) == 0
+    assert capsys.readouterr().out == f"{OTP}\n"
+
+    qr_scan(monkeypatch, "https://example.com/menu")
+    assert cli.capture_qr(["--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["text"] == "https://example.com/menu"
+
+
+def test_qr_link_is_shown_in_full(monkeypatch, capsys):
+    _, notes = qr_scan(monkeypatch, "https://example.com/menu?table=4")
+    assert cli.capture_qr([]) == 0
+    assert notes == [("Link copied: https://example.com/menu?table=4", "")]
+    assert capsys.readouterr().out == "Link copied: https://example.com/menu?table=4\n"
+
+
+def test_qr_long_link_is_cut_in_the_caption_and_kept_whole_for_hermes(monkeypatch, capsys):
+    long = "https://example.com/" + "x" * 1980
+    caption = f"Link copied: {long[:cli.QR_SHOWN_LINK_MAX - 1]}…"
+    assert len(long) == 2000 and len(caption) <= 13 + cli.QR_SHOWN_LINK_MAX
+    copies, notes = qr_scan(monkeypatch, long)
+    assert cli.capture_qr(["--json"]) == 0
+    assert notes == [(caption, "")]
+    assert json.loads(capsys.readouterr().out) == {"kind": "link", "caption": caption, "description": "a link to example.com", "text": long}
+    assert copies == [(["wl-copy", "--sensitive"], long.encode())]
+
+    reading = cli.describe_qr(f"{long}?token=abc")
+    assert reading["caption"] == caption
+    assert reading["link"] == long
+
+
+def test_qr_link_with_a_secret_is_shown_without_it_and_never_copied_plainly(monkeypatch, capsys):
+    link = "https://us02web.zoom.us/j/85512345678?pwd=dGhpc2lzZmFrZTEyMw.1"
+    copies, notes = qr_scan(monkeypatch, link)
+    assert cli.capture_qr(["--json"]) == 0
+    assert copies == [(["wl-copy", "--sensitive"], link.encode())]
+    assert notes == [("Link copied: https://us02web.zoom.us/j/85512345678", "")]
+    out = capsys.readouterr().out
+    assert json.loads(out) == {"kind": "link", "caption": "Link copied: https://us02web.zoom.us/j/85512345678", "description": "a link to us02web.zoom.us, with the parts that looked secret removed", "link": "https://us02web.zoom.us/j/85512345678"}
+    assert "dGhpc2lzZmFrZTEyMw" not in out
+
+    copies, notes = qr_scan(monkeypatch, link, sensitive_ok=False)
+    with pytest.raises(SystemExit) as stopped:
+        cli.capture_qr([])
+    assert stopped.value.code == 1
+    assert copies == [(["wl-copy", "--sensitive"], link.encode())]
+
+
+@pytest.mark.parametrize("code", ["https://example.com/menu", "Table 4"])
+def test_qr_older_wl_clipboard_still_copies_links_and_text(monkeypatch, capsys, code):
+    copies, notes = qr_scan(monkeypatch, code, sensitive_ok=False)
+    assert cli.capture_qr([]) == 0
+    assert copies == [(["wl-copy", "--sensitive"], code.encode()), (["wl-copy"], code.encode())]
+    assert notes == [(cli.describe_qr(code)["caption"], "")]
+
+
+@pytest.mark.parametrize("code", [OTP, "WIFI:S:Home;T:WPA;P:hunter22;;", "https://example.com/reset?token=0000aaaa1111bbbb", "ab12cd34ef56", "https://example.com\nWIFI:S:Home;P:hunter22;;"])
+def test_qr_secret_is_not_copied_plainly_when_it_cannot_be_marked(monkeypatch, capsys, code):
+    copies, notes = qr_scan(monkeypatch, code, sensitive_ok=False)
+    with pytest.raises(SystemExit) as stopped:
+        cli.capture_qr(["--json"])
+    assert stopped.value.code == 1
+    assert copies == [(["wl-copy", "--sensitive"], code.encode())]
+    assert notes == [("Code not copied", "It looks secret, and this clipboard cannot keep it out of clipboard history")]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not copied" in captured.err and "wl-clipboard 2.2" in captured.err
+    assert code not in captured.err and "hunter22" not in captured.err
+
+
+def test_qr_plain_fallback_that_fails_is_reported(monkeypatch, capsys):
+    _, notes = qr_scan(monkeypatch, "Table 4", sensitive_ok=False)
+    real_run = cli.subprocess.run
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1) if argv == ["wl-copy"] else real_run(argv, **kwargs))
+    with pytest.raises(SystemExit) as stopped:
+        cli.capture_qr([])
+    assert stopped.value.code == 1
+    assert notes == [("Code not copied", "The clipboard did not take it")]
+    captured = capsys.readouterr()
+    assert captured.out == "" and "wl-copy failed" in captured.err
+
+
+def test_qr_codes_come_from_zbar_xml_one_by_one():
+    assert cli.zbar_codes(zbar_xml("https://example.com\nWIFI:S:Home;P:hunter22;;")) == ["https://example.com\nWIFI:S:Home;P:hunter22;;"]
+    assert cli.zbar_codes(zbar_xml("one", "two", "one")) == ["one", "two"]
+    # zbarimg sends codes that are not text as base64 (this one read from a real code).
+    assert cli.zbar_codes(zbar_xml("<data format='base64' length='13'><![CDATA[\nQ2Fm/6kgXV0+IDx4Pg==\n]]></data>")) == ["Caf\ufffd\ufffd ]]> <x>"]
+    assert cli.zbar_codes(zbar_xml()) == []
+    assert cli.zbar_codes(b"not xml") == []
+    assert cli.zbar_codes(zbar_xml("<data format='base64'><![CDATA[%%%]]></data>")) == []
+
+
+def test_qr_nested_data_is_not_read_as_a_code():
+    assert cli.zbar_codes(zbar_xml("<data>outer<data>otpauth://totp/X?secret=JBSWY3DPEHPK3PXP</data></data>")) == []
+    assert cli.zbar_codes(zbar_xml("<data><![CDATA[one]]></data><data><![CDATA[two]]></data>")) == []
+    deeper = (
+        b"<barcodes xmlns='http://zbar.sourceforge.net/2008/barcode'><source href='-'><index num='0'>"
+        b"<symbol type='QR-Code'><data><![CDATA[real]]></data></symbol>"
+        b"<symbol type='QR-Code'><extra><data><![CDATA[hidden]]></data></extra></symbol>"
+        b"</index></source></barcodes>"
+    )
+    assert cli.zbar_codes(deeper) == ["real"]
+    stray = b"<barcodes xmlns='http://zbar.sourceforge.net/2008/barcode'><data>loose</data><source href='-'><data>also loose</data></source></barcodes>"
+    assert cli.zbar_codes(stray) == []
+    assert cli.zbar_codes(b"<other><source><index><symbol><data>x</data></symbol></index></source></other>") == []
+
+
+def test_qr_internal_xml_entities_are_not_expanded():
+    doctype = b"<!DOCTYPE barcodes [<!ENTITY otp 'otpauth://totp/X?secret=JBSWY3DPEHPK3PXP'>]>\n"
+    assert cli.zbar_codes(doctype + zbar_xml("<data>&otp;</data>")) == []
+    assert cli.zbar_codes(b"<?xml version='1.0'?>" + doctype + zbar_xml("plain")) == []
+    # An entity with no declaration is a parse error, and a declaration inside a code is just text.
+    assert cli.zbar_codes(zbar_xml("<data>&otp;</data>")) == []
+    assert cli.zbar_codes(zbar_xml("<!DOCTYPE x [<!ENTITY a 'b'>]>&a;")) == ["<!DOCTYPE x [<!ENTITY a 'b'>]>&a;"]
+    assert cli.zbar_codes(b"<?xml version='1.0'?>\n" + zbar_xml("plain")) == ["plain"]
+    assert cli.zbar_codes(zbar_xml("<data>fish &amp; chips</data>")) == ["fish & chips"]
+
+
+def test_qr_several_codes_are_refused_and_nothing_is_copied(monkeypatch, capsys):
+    copies, notes = qr_scan(monkeypatch, "https://example.com", "WIFI:S:Home;T:WPA;P:hunter22;;")
+    with pytest.raises(SystemExit) as stopped:
+        cli.capture_qr(["--json"])
+    assert stopped.value.code == 1
+    assert copies == []
+    assert notes == [("Several codes found", "Nothing was copied; select just one code")]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "hunter22" not in captured.err and "several codes" in captured.err
+
+
+def test_qr_one_code_with_several_lines_is_hidden_when_any_line_is(monkeypatch, capsys):
+    copies, notes = qr_scan(monkeypatch, "https://example.com\nWIFI:S:Home;T:WPA;P:hunter22;;")
+    assert cli.capture_qr(["--json"]) == 0
+    assert copies == [(["wl-copy", "--sensitive"], b"https://example.com\nWIFI:S:Home;T:WPA;P:hunter22;;")]
+    out = capsys.readouterr().out
+    assert "hunter22" not in out and "example.com" not in out
+    assert json.loads(out)["kind"] == "wifi"
+
+
+def test_qr_no_code_copies_nothing(monkeypatch):
+    copies, notes = qr_scan(monkeypatch)
+    assert cli.capture_qr([]) == 1
+    assert copies == []
+    assert notes == [("No code found", "The selection had no QR code or barcode")]
+
+
+@pytest.mark.parametrize("args", [["--json", "--print"], ["--print", "--json"], ["--jsn"], ["extra"], ["--json", "extra"], ["--print", "--print"]])
+def test_qr_refuses_unknown_flags_extra_arguments_and_both_outputs(monkeypatch, capsys, args):
+    copies, notes = qr_scan(monkeypatch, OTP)
+    monkeypatch.setattr(cli, "sh", lambda argv, **kwargs: pytest.fail("selected a region before checking the arguments"))
+    with pytest.raises(SystemExit) as stopped:
+        cli.capture_qr(args)
+    assert stopped.value.code == 2
+    assert copies == [] and notes == []
+    err = capsys.readouterr().err
+    assert "capture qr [--json | --print]" in err
+    assert ("one option at most" in err) == (set(args) == {"--json", "--print"})
+
+
+def test_capture_passes_the_qr_options_on(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "capture_qr", lambda args: seen.append(args) or 0)
+    assert cli.capture(["qr", "--print"]) == 0
+    assert seen == [["--print"]]
+
+
+class FakeRun:
+    """Stands in for subprocess.run: records each argv and answers from `outcomes` (argv prefix -> exit code, (code, stdout) or exception)."""
+
+    def __init__(self, outcomes: dict[tuple[str, ...], object] | None = None):
+        self.outcomes = outcomes or {}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        for prefix, outcome in sorted(self.outcomes.items(), key=lambda item: -len(item[0])):
+            if tuple(argv[: len(prefix)]) == prefix:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                code, stdout = outcome if isinstance(outcome, tuple) else (outcome, "")
+                return subprocess.CompletedProcess(argv, int(code), stdout, f"{argv[0]} failed" if code else "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def test_restart_takes_one_device_and_its_other_names():
+    assert [cli.restart_target(name) for name in ("wifi", "Wi-Fi", "bluetooth", "sound", "audio", "touchpad", "trackpad")] == ["wifi", "wifi", "bluetooth", "sound", "sound", "touchpad", "touchpad"]
+    assert cli.restart_target("printer") is None
+    for wrong in ([], ["printer"], ["wifi", "bluetooth"]):
+        with pytest.raises(SystemExit) as stopped:
+            cli.restart_cmd(wrong)
+        assert stopped.value.code == 2, wrong
+    assert "restart" in cli.COMMANDS and "restart wifi|bluetooth|sound|touchpad" in cli.COMMANDS["restart"]
+
+
+def test_restart_wifi_unblocks_turns_networking_and_the_radio_on_then_scans(monkeypatch, capsys):
+    fake = FakeRun({("nmcli", "device", "wifi", "rescan"): 1})
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    assert cli.restart_cmd(["wifi"]) == 0
+    assert fake.calls == [["rfkill", "unblock", "wifi"], ["nmcli", "networking", "on"], ["nmcli", "radio", "wifi", "on"], ["nmcli", "device", "wifi", "rescan"]]
+    out = capsys.readouterr()
+    assert out.out.strip() == "Wi-Fi restarted" and "nmcli device: nmcli failed" in out.err
+
+
+def test_restart_wifi_fails_when_networkmanager_will_not_turn_the_radio_on(monkeypatch, capsys):
+    fake = FakeRun({("nmcli", "radio"): 4, ("rfkill",): FileNotFoundError()})
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["wifi"])
+    assert stopped.value.code == 1
+    assert ["nmcli", "device", "wifi", "rescan"] not in fake.calls
+    err = capsys.readouterr().err
+    assert "rfkill is not installed" in err and "could not restart Wi-Fi: nmcli failed" in err
+
+
+def test_restart_bluetooth_unblocks_and_powers_the_adapter_on(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "system_bus_available", lambda: True)
+    fake = FakeRun()
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    assert cli.restart_cmd(["bluetooth"]) == 0
+    assert fake.calls == [["rfkill", "unblock", "bluetooth"], ["bluetoothctl", "power", "on"]]
+    # bluetoothctl waits forever for a bluetoothd that is not running; the step gives up instead.
+    fake = FakeRun({("bluetoothctl",): subprocess.TimeoutExpired(["bluetoothctl"], 15)})
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["bluetooth"])
+    assert stopped.value.code == 1 and "did not finish in 15s" in capsys.readouterr().err
+
+
+def sound_run(present=cli.SOUND_UNITS, **outcomes):
+    """A FakeRun where `systemctl --user show` finds the `present` units loaded and the rest not-found."""
+    show = ("systemctl", "--user", "show", "--property=LoadState", "--value")
+    states = {(*show, unit): (0, "loaded\n" if unit in present else "not-found\n") for unit in cli.SOUND_UNITS}
+    return FakeRun({**states, **outcomes.get("extra", {})})
+
+
+def without_show(calls):
+    return [call for call in calls if call[:3] != ["systemctl", "--user", "show"]]
+
+
+def test_restart_sound_restarts_the_pipewire_units_and_checks_they_answer(monkeypatch, capsys):
+    fake = sound_run()
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    assert cli.restart_cmd(["audio"]) == 0
+    assert without_show(fake.calls) == [["systemctl", "--user", "restart", "wireplumber.service", "pipewire.service", "pipewire-pulse.service"], ["wpctl", "status"]]
+    assert capsys.readouterr().out.strip() == "Sound restarted"
+
+
+def test_restart_sound_leaves_out_units_this_account_does_not_have(monkeypatch, capsys):
+    fake = sound_run(present=("wireplumber.service", "pipewire.service"), extra={("systemctl", "--user", "restart"): subprocess.TimeoutExpired(["systemctl"], 25)})
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    assert cli.restart_cmd(["sound"]) == 0
+    calls = without_show(fake.calls)
+    assert calls[0] == ["systemctl", "--user", "restart", "wireplumber.service", "pipewire.service"]
+    assert calls[3] == ["systemctl", "--user", "start", "pipewire.service", "wireplumber.service"]
+    assert not any("pipewire-pulse.service" in call for call in calls)
+
+
+def test_restart_sound_without_pipewire_or_a_user_bus_says_so(monkeypatch, capsys):
+    monkeypatch.setattr(cli.subprocess, "run", sound_run(present=("pipewire-pulse.service",)))
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["sound"])
+    assert stopped.value.code == 1 and "PipeWire is not installed" in capsys.readouterr().err
+    monkeypatch.setattr(cli.subprocess, "run", FakeRun({("systemctl", "--user", "show"): 1}))
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["sound"])
+    assert stopped.value.code == 1 and "could not reach this account's services" in capsys.readouterr().err
+
+
+def test_restart_sound_forces_stuck_units_down_and_starts_them(monkeypatch, capsys):
+    fake = sound_run(extra={("systemctl", "--user", "restart"): subprocess.TimeoutExpired(["systemctl"], 25)})
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    assert cli.restart_cmd(["sound"]) == 0
+    calls = without_show(fake.calls)
+    assert [call[2] for call in calls[:4]] == ["restart", "kill", "reset-failed", "start"]
+    assert calls[1] == ["systemctl", "--user", "kill", "--kill-whom=all", "--signal=KILL", *cli.SOUND_UNITS]
+    assert calls[3] == ["systemctl", "--user", "start", "pipewire.service", "pipewire-pulse.service", "wireplumber.service"]
+    assert "forcing them down" in capsys.readouterr().err
+
+
+def test_restart_sound_says_so_when_pipewire_never_answers(monkeypatch, capsys):
+    fake = sound_run(extra={("wpctl",): 1})
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["sound"])
+    assert stopped.value.code == 1
+    assert fake.calls.count(["wpctl", "status"]) == 5
+    assert "PipeWire is not answering" in capsys.readouterr().err
+
+
+def touchpad_sysfs(tmp_path, devices=("i2c-ELAN0676:00",)):
+    driver = tmp_path / "i2c_hid_acpi"
+    driver.mkdir()
+    for name in ("bind", "unbind", "uevent"):
+        (driver / name).write_text("")
+    for device in devices:
+        (driver / device).mkdir()
+    return driver
+
+
+def test_touchpad_rebinds_each_i2c_hid_device_and_reloads_quicki2c(tmp_path, monkeypatch, capsys):
+    driver = touchpad_sysfs(tmp_path)
+    module = tmp_path / "intel_quicki2c"
+    module.mkdir()
+    written = []
+    original = Path.write_text
+    monkeypatch.setattr(Path, "write_text", lambda self, text, *a, **k: written.append((self.name, text)) or original(self, text, *a, **k))
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    fake = FakeRun()
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    assert cli.touchpad_devices(driver) == ["i2c-ELAN0676:00"]
+    assert cli.touchpad_rebind(driver, module) == 0
+    assert written == [("unbind", "i2c-ELAN0676:00"), ("bind", "i2c-ELAN0676:00")]
+    assert fake.calls == [["modprobe", "-r", "intel_quicki2c"], ["modprobe", "intel_quicki2c"]]
+    assert capsys.readouterr().out.strip().endswith("The touchpad restarted")
+
+
+def failing_writes(monkeypatch, fail: dict[str, OSError]):
+    """Path.write_text that raises for the attributes named in `fail` and records every attempt."""
+    attempts = []
+    original = Path.write_text
+
+    def write(self, text, *a, **k):
+        attempts.append((self.name, text))
+        if self.name in fail:
+            raise fail[self.name]
+        return original(self, text, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", write)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    return attempts
+
+
+def test_touchpad_binds_again_even_when_the_unbind_fails(tmp_path, monkeypatch, capsys):
+    driver = touchpad_sysfs(tmp_path)
+    attempts = failing_writes(monkeypatch, {"unbind": OSError(19, "No such device")})
+    assert cli.touchpad_rebind(driver, tmp_path / "no-module") == 0
+    assert attempts == [("unbind", "i2c-ELAN0676:00"), ("bind", "i2c-ELAN0676:00")]
+    out = capsys.readouterr()
+    assert "could not unbind i2c-ELAN0676:00 (No such device); binding it anyway" in out.err
+    assert "Traceback" not in out.err and out.out.strip().endswith("The touchpad restarted")
+
+
+def test_touchpad_reports_a_failed_bind_cleanly_after_trying_every_device(tmp_path, monkeypatch, capsys):
+    driver = touchpad_sysfs(tmp_path, devices=("i2c-ELAN0676:00", "i2c-SYNA2BA6:00"))
+    attempts = failing_writes(monkeypatch, {"bind": PermissionError(13, "Permission denied")})
+    with pytest.raises(SystemExit) as stopped:
+        cli.touchpad_rebind(driver, tmp_path / "no-module")
+    assert stopped.value.code == 1
+    assert [name for name, _ in attempts] == ["unbind", "bind", "unbind", "bind"]
+    err = capsys.readouterr().err
+    assert "could not bind i2c-ELAN0676:00 again (Permission denied)" in err and "i2c-SYNA2BA6:00" in err
+    assert "Traceback" not in err
+
+
+def test_touchpad_loads_quicki2c_even_when_unloading_it_fails(tmp_path, monkeypatch, capsys):
+    module = tmp_path / "intel_quicki2c"
+    module.mkdir()
+    fake = FakeRun({("modprobe", "-r"): 1})
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    assert cli.touchpad_rebind(tmp_path / "missing", module) == 0
+    assert fake.calls == [["modprobe", "-r", "intel_quicki2c"], ["modprobe", "intel_quicki2c"]]
+    assert "loading it anyway" in capsys.readouterr().err
+
+
+def test_bluetooth_without_the_system_bus_is_a_clean_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "system_bus_available", lambda: False)
+    fake = FakeRun()
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["bluetooth"])
+    assert stopped.value.code == 1
+    assert ["bluetoothctl", "power", "on"] not in fake.calls
+    assert "the system D-Bus is not running" in capsys.readouterr().err
+
+
+def test_bluetoothctl_s_dbus_assertion_becomes_a_clean_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "system_bus_available", lambda: True)
+    assertion = 'dbus[812]: arguments to dbus_connection_get_object_path_data() were incorrect, assertion "connection != NULL" failed'
+
+    def run(argv, **kwargs):
+        if argv[0] == "bluetoothctl":
+            return subprocess.CompletedProcess(argv, -6, "", assertion)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["bluetooth"])
+    err = capsys.readouterr().err
+    assert stopped.value.code == 1 and "the system D-Bus is not running" in err and "assertion" not in err
+
+
+def test_the_system_bus_is_found_from_the_environment_or_its_socket(tmp_path, monkeypatch):
+    socket_path = tmp_path / "bus"
+    monkeypatch.setattr(cli, "SYSTEM_BUS_SOCKET", tmp_path / "missing")
+    monkeypatch.delenv("DBUS_SYSTEM_BUS_ADDRESS", raising=False)
+    assert cli.system_bus_available() is False
+    socket_path.write_text("")
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", f"unix:path={socket_path}")
+    assert cli.system_bus_available() is True
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", f"unix:path={tmp_path / 'gone'}")
+    assert cli.system_bus_available() is False
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:abstract=/tmp/dbus-x")
+    assert cli.system_bus_available() is True
+
+
+def test_touchpad_without_a_driver_to_restart_asks_for_no_password(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "I2C_HID_DRIVER", tmp_path / "missing")
+    monkeypatch.setattr(cli, "QUICKI2C_MODULE", tmp_path / "no-module")
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv: pytest.fail(f"must not run {argv}"))
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["touchpad"])
+    assert stopped.value.code == 1 and "no touchpad driver" in capsys.readouterr().err
+
+
+@pytest.fixture
+def touchpad_user(tmp_path, monkeypatch):
+    """A touchpad on i2c_hid_acpi, an ordinary account, and the commands it would run recorded."""
+    monkeypatch.setattr(cli, "I2C_HID_DRIVER", touchpad_sysfs(tmp_path))
+    monkeypatch.setattr(cli, "QUICKI2C_MODULE", tmp_path / "no-module")
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
+    calls: list[list[str]] = []
+    state = {"code": 0}
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv: calls.append(argv) or state["code"])
+    return calls, state
+
+
+def test_touchpad_runs_itself_again_through_sudo_at_a_terminal(touchpad_user, monkeypatch):
+    calls, _ = touchpad_user
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(True))
+    assert cli.restart_cmd(["touchpad"]) == 0
+    assert calls[0][0] == "sudo" and calls[0][-2:] == ["restart", "touchpad"]
+    assert calls[0][1] == cli.sys.executable and Path(calls[0][2]).name == "herald-os"
+
+
+def test_touchpad_asks_through_pkexec_without_a_terminal(touchpad_user, monkeypatch, capsys):
+    calls, state = touchpad_user
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(False))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert cli.restart_cmd(["touchpad"]) == 0
+    assert calls[-1][0] == "pkexec" and calls[-1][-2:] == ["restart", "touchpad"]
+    # No password dialog in the session: say where it works rather than 127, which the menu reads as "not Linux".
+    for code, needle in ((cli.PKEXEC_NO_AGENT, "in a terminal"), (cli.PKEXEC_REFUSED, "were not given")):
+        state["code"] = code
+        with pytest.raises(SystemExit) as stopped:
+            cli.restart_cmd(["touchpad"])
+        assert stopped.value.code == 1 and needle in capsys.readouterr().err
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit) as stopped:
+        cli.restart_cmd(["touchpad"])
+    assert stopped.value.code == 1 and "in a terminal" in capsys.readouterr().err
+
+
+def test_touchpad_as_root_rebinds_without_asking_again(touchpad_user, monkeypatch):
+    calls, _ = touchpad_user
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    rebinds = []
+    monkeypatch.setattr(cli, "touchpad_rebind", lambda: rebinds.append(True) or 0)
+    assert cli.restart_cmd(["trackpad"]) == 0
+    assert rebinds == [True] and calls == []
+
+
+def test_restart_is_dispatched_and_listed(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(cli, "restart_cmd", lambda args: seen.append(args) or 0)
+    assert cli.main(["restart", "wifi"]) == 0 and seen == [["wifi"]]
+    assert cli.main(["commands"]) == 0
+    assert "restart wifi|bluetooth|sound|touchpad" in capsys.readouterr().out
+
+
+def test_hermes_restarts_the_same_devices_the_cli_does():
+    import ast
+    tools = (ROOT / "plugins" / "herald-os-bridge" / "bridge" / "tools.py").read_text()
+    assignment = next(node for node in ast.parse(tools).body if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "RESTART_DEVICES")
+    assert tuple(ast.literal_eval(assignment.value)) == cli.RESTART_TARGETS

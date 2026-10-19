@@ -22,7 +22,7 @@ const MAX_OFFICE_BYTES = 512 * 1024 * 1024
 const isApp = (value: unknown): value is OfficeApp => OFFICE_APPS.includes(value as OfficeApp)
 
 /** An Office file Herald may read and write: in the home folder (or /tmp), outside protected places. */
-function officePath(target: unknown): string {
+function officePath(target: unknown): Promise<string> {
   return assertWritable(String(target))
 }
 
@@ -90,7 +90,7 @@ async function pickPdf(parent: BrowserWindow | undefined, title: string, suggest
 
 /** Write the PDF `render` makes at `target` (.pdf added when it has none), once the place is allowed. */
 async function writePdf(target: string, render: () => Promise<Uint8Array>): Promise<string> {
-  const file = officePath(target.toLowerCase().endsWith('.pdf') ? target : `${target}.pdf`)
+  const file = await officePath(target.toLowerCase().endsWith('.pdf') ? target : `${target}.pdf`)
   await fs.mkdir(path.dirname(file), { recursive: true })
   await atomicWrite(file, await render())
 
@@ -149,7 +149,7 @@ export function registerOfficeIpc(getWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.officeRead, async (_event, target: string): Promise<OfficeFileData> => {
-    const file = officePath(target)
+    const file = await officePath(target)
     const stat = await fs.stat(file)
 
     if (!stat.isFile()) {
@@ -166,7 +166,7 @@ export function registerOfficeIpc(getWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.officeWrite, async (event, target: string, bytes: Uint8Array, options: { backup?: boolean } = {}): Promise<OfficeWriteResult> => {
-    const file = officePath(target)
+    const file = await officePath(target)
 
     if (!(bytes instanceof Uint8Array) || bytes.byteLength > MAX_OFFICE_BYTES) {
       throw new Error(`An Office file is bytes, at most ${MAX_OFFICE_BYTES / 1024 / 1024} MB`)
@@ -192,7 +192,7 @@ export function registerOfficeIpc(getWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.officeWatch, async (event, target: string, loaded?: string | null): Promise<string> => {
-    const file = officePath(target)
+    const file = await officePath(target)
     const owner = event.sender
     const watchId = crypto.randomUUID()
     const current = await stampOf(file)
@@ -230,12 +230,15 @@ export function registerOfficeIpc(getWindow: () => BrowserWindow | null): void {
 
     if (!reporting.has(sender)) {
       const id = sender.id
-      reporting.add(sender)
-      sender.once('destroyed', () => {
+      const clear = () => {
         for (const app of OFFICE_APPS) {
           presence.delete(`${id}:${app}`)
         }
-      })
+      }
+      reporting.add(sender)
+      sender.once('destroyed', clear)
+      // A reload keeps the web contents but not its documents: what it reported before is gone.
+      sender.on('did-navigate', clear)
     }
 
     const documents = Array.isArray(report.documents) ? report.documents : []
@@ -301,7 +304,7 @@ export function registerOfficeIpc(getWindow: () => BrowserWindow | null): void {
     })
   )
 
-  ipcMain.handle(IPC.officeConvert, async (_event, target: string, to: string) => convertWithLibreOffice(officePath(target), String(to)))
+  ipcMain.handle(IPC.officeConvert, async (_event, target: string, to: string) => convertWithLibreOffice(await officePath(target), String(to)))
 
   const templates = new OfficeTemplates(path.join(heraldOsDataDir(), 'office-templates'))
   ipcMain.handle(IPC.officeTemplates, (_event, app: OfficeApp) => templates.list(app))

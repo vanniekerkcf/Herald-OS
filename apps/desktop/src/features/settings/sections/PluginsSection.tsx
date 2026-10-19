@@ -4,10 +4,12 @@ import { useState } from 'react'
 import { describePermissions, type PluginView } from '../../../../shared/plugins.ts'
 import { GlassButton, Pill, Toggle } from '../../../components/ui/glass.tsx'
 import { Spinner } from '../../../components/ui/primitives.tsx'
+import { openInDefaultApp } from '../../files/files-store.ts'
 import { notify } from '../../../store/notifications.ts'
 import { $plugins } from '../../../store/plugins.ts'
 import { openAsk } from '../../../store/surface.ts'
 import { openApp } from '../../../store/windows.ts'
+import { useT } from '../../../store/i18n.ts'
 import { errorText, InlineNote, markSaved, SectionTitle, SettingsGroup, SettingsRow } from './shared.tsx'
 
 const MAKE_A_WIDGET = 'Make me a Herald OS widget that '
@@ -18,6 +20,7 @@ const MAKE_A_WIDGET = 'Make me a Herald OS widget that '
  * arrive turned off.
  */
 export function PluginsSection() {
+  const t = useT()
   const plugins = useStore($plugins)
   const [url, setUrl] = useState('')
   const [adding, setAdding] = useState(false)
@@ -38,7 +41,7 @@ export function PluginsSection() {
 
   return (
     <>
-      <SectionTitle title="Plugins" subtitle="Widgets for the menu bar, the Overview and their own windows. Each runs in a sandbox and gets only what you allow." />
+      <SectionTitle title={t('settings.section.plugins')} subtitle={t('settings.plugins.subtitle')} />
 
       <SettingsGroup title="Installed">
         {plugins.length === 0 && <SettingsRow icon={<IconPuzzle />} label="No plugins yet" description="Add one from git below, or ask Hermes to make one." />}
@@ -68,7 +71,7 @@ export function PluginsSection() {
           </GlassButton>
         </SettingsRow>
         <SettingsRow icon={<IconFolder />} label="Plugins folder" description={<span className="font-mono text-[11.5px]">~/.config/herald-os/plugins</span>} keywords="plugin folder files">
-          <GlassButton size="sm" variant="ghost" onClick={() => void window.heraldOS.fs.openPath('~/.config/herald-os/plugins')}>
+          <GlassButton size="sm" variant="ghost" onClick={() => openInDefaultApp('~/.config/herald-os/plugins')}>
             Open
           </GlassButton>
         </SettingsRow>

@@ -64,7 +64,7 @@ export function bindOsControl(): () => void {
   const off = bridge.onRequest(async (request: OsControlRequest) => {
     try {
       if (request.kind === 'run') {
-        bridge.reply({ requestId: request.requestId, result: await runCommand(request.command, request.args, { source: request.source }) })
+        bridge.reply({ requestId: request.requestId, result: await runCommand(request.command, request.args, { source: request.source, session: request.session ?? null }) })
       } else if (request.kind === 'list') {
         bridge.reply({ requestId: request.requestId, result: listCommands({ includeHidden: true }) })
       } else {
